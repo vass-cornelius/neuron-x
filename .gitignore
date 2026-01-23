@@ -1,0 +1,6 @@
+memory_vault
+.agent
+__pycache__
+.env
+nohup.out
+.venv

@@ -1,0 +1,9 @@
+python-dotenv
+google-genai
+networkx
+numpy
+sentence-transformers
+scikit-learn
+rich
+torch
+prompt-toolkit

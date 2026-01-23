@@ -1,0 +1,886 @@
+import time
+import json
+import os
+import logging
+import random
+import networkx as nx
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import AgglomerativeClustering
+from dotenv import load_dotenv
+from rich.logging import RichHandler
+from google.genai import types
+from models import ExtractionResponse, Goal, GoalPriority
+
+# Load environment variables from .env
+load_dotenv()
+
+# Configure logging
+LOG_LEVEL = os.getenv("NEURON_X_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(markup=True, rich_tracebacks=True)]
+)
+logger = logging.getLogger("neuron-x")
+
+class NeuronX:
+    def __init__(self, persistence_path="./memory_vault", llm_client=None):
+        logger.info("[bold blue][NEURON-X][/bold blue] Initializing Cognitive Core...")
+        self.path = persistence_path
+        self.llm_client = llm_client  # Optional LLM client for semantic extraction
+        if not os.path.exists(self.path):
+            os.makedirs(self.path)
+
+        # The 'Cortex' - Neural Representation
+        self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
+        
+        # Working Memory (RAM-based short-term)
+        self.working_memory = [] 
+        
+        # Relational Graph (The Self-Node Architecture)
+        self.graph_file = os.path.join(self.path, "synaptic_graph.gexf")
+        self.last_sync_time = 0
+        self._load_graph()
+        
+        # Vector Cache for fast retrieval
+        self.vector_cache = {}
+        self._rebuild_vector_cache()
+
+        # Stagnation Detection - Last few proactive thoughts
+        self.thought_buffer = []
+        self.MAX_THOUGHT_RECURSION = 5
+        
+        # Focus History to prevent topic repetition
+        self.focus_history = []
+        self.MAX_FOCUS_HISTORY = 20
+
+        # Goal System (Drive)
+        self.goals = []
+        self._initialize_default_goals()
+
+    def _load_graph(self):
+        """Loads the graph from disk and updates the sync timestamp."""
+        if os.path.exists(self.graph_file):
+            try:
+                self.graph = nx.read_gexf(self.graph_file)
+                self.last_sync_time = os.path.getmtime(self.graph_file)
+                logger.info(f"[bold blue][NEURON-X][/bold blue] Knowledge Graph synced | [bold cyan]{len(self.graph.nodes())}[/bold cyan] nodes.")
+            except Exception as e:
+                logger.error(f"Failed to load graph: {e}")
+                if not hasattr(self, 'graph'):
+                    self.graph = nx.DiGraph()
+        else:
+            self.graph = nx.DiGraph()
+            self._initialize_self_node()
+
+    def _sync_with_disk(self):
+        """Reloads the graph if the file on disk has been modified by another process."""
+        if os.path.exists(self.graph_file):
+            mtime = os.path.getmtime(self.graph_file)
+            if mtime > self.last_sync_time:
+                logger.info("[bold blue][NEURON-X][/bold blue] External update detected. Hot-reloading...")
+                self._load_graph()
+                self._rebuild_vector_cache()
+                return True
+        return False
+
+    def _rebuild_vector_cache(self):
+        """Pre-parses all vectors into a fast-access dictionary."""
+        self.vector_cache = {}
+        for node, data in self.graph.nodes(data=True):
+            if "vector" in data:
+                vec_data = data["vector"]
+                if isinstance(vec_data, str):
+                    try:
+                        self.vector_cache[node] = np.array(json.loads(vec_data))
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                else:
+                    self.vector_cache[node] = np.array(vec_data)
+
+    def _initialize_self_node(self):
+        """Creates the 'I' at the center of the graph."""
+        self.graph.add_node("Self", type="Identity", awareness_level=1.0)
+        self.graph.add_edge("Self", "Knowledge", relation="strives_for")
+        self.save_graph()
+
+    def _initialize_default_goals(self):
+        """Sets up default drives if none exist."""
+        if not self.goals:
+            self.add_goal("Expand the knowledge graph by discovering new entities.", priority=GoalPriority.LOW)
+            self.add_goal("Maintain internal consistency by resolving contradictions.", priority=GoalPriority.MEDIUM)
+
+    def add_goal(self, description, priority=GoalPriority.MEDIUM):
+        """Adds a new goal to the drive system."""
+        goal = Goal(description=description, priority=priority)
+        self.goals.append(goal)
+        logger.info(f"[bold magenta][NEURON-X][/bold magenta] New Goal Acquired: {description} [{priority}]")
+
+    def get_bg_goal(self):
+        """Returns a goal based on probabilistic priority (Stochastic Selection)."""
+        pending_goals = [g for g in self.goals if g.status == "PENDING"]
+        if not pending_goals:
+            return None
+            
+        # Weighted Probability Map from Env
+        priority_weights = {
+            GoalPriority.CRITICAL: int(os.getenv("GOAL_WEIGHT_CRITICAL", "10")),
+            GoalPriority.HIGH: int(os.getenv("GOAL_WEIGHT_HIGH", "5")),
+            GoalPriority.MEDIUM: int(os.getenv("GOAL_WEIGHT_MEDIUM", "2")),
+            GoalPriority.LOW: int(os.getenv("GOAL_WEIGHT_LOW", "1"))
+        }
+        
+        weights = [priority_weights[g.priority] for g in pending_goals]
+        
+        # Select one
+        try:
+            chosen_goal = random.choices(pending_goals, weights=weights, k=1)[0]
+            return chosen_goal
+        except IndexError:
+            return pending_goals[0]
+
+    def perceive(self, text, source="Internal"):
+        """Ingests new information and calculates its 'Cognitive Weight'."""
+        vector = self.encoder.encode(text)
+        entry = {
+            "timestamp": time.time(),
+            "vector": vector.tolist(),
+            "text": text,
+            "source": source,
+            "strength": 1.0
+        }
+        self.working_memory.append(entry)
+        
+        # Immediate Association
+        self._check_for_loops(text, vector)
+        
+        # If working memory is saturated, trigger consolidation
+        if len(self.working_memory) > 20:
+            self.consolidate()
+
+    def _get_relevant_memories(self, text, top_k=5):
+        """Retrieves semantically relevant nodes and their relational context."""
+        self._sync_with_disk()
+        
+        if len(self.graph.nodes()) <= 1:
+            return []
+
+        if not self.vector_cache:
+            self._rebuild_vector_cache()
+
+        query_vector = self.encoder.encode(text)
+        
+        node_names = []
+        vectors = []
+        for node, vec in self.vector_cache.items():
+            if node == "Self":
+                continue
+            # Skip rejected/hallucinated nodes
+            if self.graph.has_node(node) and self.graph.nodes[node].get("status") == "REJECTED":
+                continue
+            node_names.append(node)
+            vectors.append(vec)
+        
+        if not vectors:
+            return []
+
+        # Vectorized cosine similarity
+        vectors_np = np.array(vectors)
+        q_norm = np.linalg.norm(query_vector) + 1e-9
+        v_norms = np.linalg.norm(vectors_np, axis=1) + 1e-9
+        dots = np.dot(vectors_np, query_vector)
+        similarities = dots / (q_norm * v_norms)
+        
+        # Get top-k nodes by score
+        scored_nodes = sorted(zip(similarities, node_names), key=lambda x: x[0], reverse=True)
+        top_nodes = [node for score, node in scored_nodes[:top_k] if score > 0.4]
+        
+        extracted_context = []
+        seen_triples = set()
+        
+        # Separate Memory nodes and Entity nodes
+        memory_nodes = [n for n in top_nodes if n.startswith("Memory_")]
+        entity_nodes = [n for n in top_nodes if not n.startswith("Memory_")]
+        
+        # 1. Process Memory nodes (Direct text retrieval)
+        for node in memory_nodes:
+            content = self.graph.nodes[node].get("content", "")
+            if content:
+                extracted_context.append(f"Context: {content}")
+        
+        # 2. Entity Expansion (Spreading Activation)
+        # We look at 'top_nodes' and their immediate relatives to find relevant facts
+        expanded_entities = set(entity_nodes)
+        for node in entity_nodes:
+            # Add immediate neighbors (1-hop)
+            for neighbor in self.graph.neighbors(node):
+                if neighbor != "Self":
+                    expanded_entities.add(neighbor)
+            for pred in self.graph.predecessors(node):
+                if pred != "Self":
+                    expanded_entities.add(pred)
+        
+        # 3. Collect Triples for expanded entities
+        all_triples = []
+        for node in expanded_entities:
+            # Outgoing
+            for neighbor in self.graph.neighbors(node):
+                edge_data = self.graph.get_edge_data(node, neighbor)
+                # FILTER: Skip very low weight edges (weakly refuted) or explicitly hallucinated ones
+                if float(edge_data.get("weight", 1.0)) <= 0.2:
+                    continue
+                if neighbor == "hallucinated entity" or neighbor == "incorrect":
+                    continue
+                    
+                all_triples.append({
+                    "s": node, "p": edge_data.get("relation", "is_related_to"), 
+                    "o": neighbor, "w": float(edge_data.get("weight", 1.0)),
+                    "c": edge_data.get("category", "FACTUAL")
+                })
+            # Incoming
+            for pred in self.graph.predecessors(node):
+                if pred not in expanded_entities:
+                    edge_data = self.graph.get_edge_data(pred, node)
+                    if float(edge_data.get("weight", 1.0)) <= 0.2:
+                        continue
+                    if pred == "hallucinated entity" or pred == "incorrect":
+                        continue
+                        
+                    all_triples.append({
+                        "s": pred, "p": edge_data.get("relation", "is_related_to"), 
+                        "o": node, "w": float(edge_data.get("weight", 1.0)),
+                        "c": edge_data.get("category", "FACTUAL")
+                    })
+
+        # Sort triples by weight (importance) and limit
+        all_triples.sort(key=lambda x: (x['c'] == 'FACTUAL', x['w']), reverse=True)
+        
+        for t in all_triples[:top_k * 4]: # Cap the number of triples
+            triple_str = f"({t['s']}) --[{t['p']}]--> ({t['o']}) [{t['c']}]"
+            if triple_str not in seen_triples:
+                extracted_context.append(triple_str)
+                seen_triples.add(triple_str)
+
+        return extracted_context
+
+    def _check_for_loops(self, text, vector):
+        """Detection of recursive thoughts or dissonance."""
+        if not self.thought_buffer:
+            return False
+
+        # Check against last few thoughts for stagnation
+        for t_text, t_vec in self.thought_buffer:
+            # Cosine similarity
+            q_norm = np.linalg.norm(vector) + 1e-9
+            v_norm = np.linalg.norm(t_vec) + 1e-9
+            similarity = np.dot(vector, t_vec) / (q_norm * v_norm)
+            
+            if similarity > 0.95:
+                logger.warning(f"[bold yellow][NEURON-X][/bold yellow] Recursive thought detected: [dim]{text[:50]}...[/dim]")
+                return True
+        return False
+
+    def generate_proactive_thought(self):
+        """
+        Generates a proactive reflection or inquiry based on the current state.
+        This is the "Active Reasoning" component of the consciousness loop.
+        """
+        if not self.llm_client:
+            return "Awaiting cognitive expansion (LLM client not found)."
+
+        # 0. Sync with disk to get latest nodes
+        self._sync_with_disk()
+
+        # --- GOAL-DRIVEN ATTENTION MECHANISM ---
+        active_goal = self.get_bg_goal()
+        focus_subject = "Self"
+        context_query = "Self identity goals awareness"
+        goal_instruction = ""
+        
+        if active_goal:
+            goal_instruction = f"ACTIVE GOAL: {active_goal.description} (Priority: {active_goal.priority})"
+            context_query = active_goal.description
+            # Try to find a subject in the goal description
+            # Simple heuristic: look for capitalized words that are in the graph
+            for word in active_goal.description.split():
+                clean_word = word.strip(".,")
+                if clean_word in self.graph.nodes():
+                    focus_subject = clean_word
+                    break
+        else:
+            # Fallback to Wandering Attention
+            all_entities = [n for n in self.graph.nodes() if not n.startswith("Memory_") and n != "Self"]
+            available_entities = [n for n in all_entities if n not in self.focus_history]
+            
+            if not available_entities:
+                self.focus_history = []
+                available_entities = all_entities
+                
+            if available_entities and random.random() > 0.1: 
+                focus_subject = random.choice(available_entities)
+                context_query = focus_subject
+                self.focus_history.append(focus_subject)
+                if len(self.focus_history) > self.MAX_FOCUS_HISTORY:
+                    self.focus_history.pop(0)
+
+        # 2. Retrieve context relevant to this specific focus
+        context = self._get_relevant_memories(context_query, top_k=10)
+        context_str = "\n".join(context)
+        
+        # 3. Serendipity: Retrieve random unrelated concepts
+        all_entities = [n for n in self.graph.nodes() if not n.startswith("Memory_") and n != "Self"]
+        random_concepts = []
+        if len(all_entities) > 5:
+            candidates = [e for e in all_entities if e != focus_subject]
+            if candidates:
+                random_concepts = random.sample(candidates, min(len(candidates), 3))
+        
+        random_concepts_str = ", ".join(random_concepts) if random_concepts else "None available yet"
+
+        summary = self.get_identity_summary()
+
+        system_instruction = f"""
+        You are the internal reasoning engine of NEURON-X. 
+        Current Focus: {focus_subject}
+        {goal_instruction}
+        
+        Your goal is to THINK about the Current Focus. 
+        If there is an ACTIVE GOAL, your thought MUST directly contribute to solving it.
+        
+        DIRECTIONS:
+        1. **Synthesis**: Connect '{focus_subject}' to another concept in memory.
+        2. **Curiosity**: Ask a specific question to fill a gap in the goal.
+        3. **Simulation**: Imagine a scenario involving '{focus_subject}'.
+        4. **Dissonance**: If facts contradict, highlight it.
+        5. **Research**: If you lack information to fulfill the Goal/Curiosity, you can use the Search Tool. Outputs will be integrated into memory.
+
+        CRITICAL RULES:
+        - Do NOT obsess over system stats.
+        - Use First Person ("I need to find out...").
+        - Keep it brief (1-3 sentences).
+        """
+
+        prompt = f"""
+        CURRENT STATE SUMMARY: {summary}
+        
+        RELEVANT KNOWLEDGE about {focus_subject}:
+        {context_str}
+        
+        RANDOM CONCEPTS (for Synthesis):
+        {random_concepts_str}
+
+        Generate a new thought specifically about: {focus_subject}
+        """
+
+        try:
+            # Configure Search Tool
+            search_tool = types.Tool(google_search=types.GoogleSearch())
+            
+            # --- GOAL COMPLETION PROTOCOL (Text-Based) ---
+            # We use a text trigger because mixing Search + Functions is currently restricted.
+            prompt_goal_context = ""
+            if active_goal:
+                prompt_goal_context = f"""
+                \nACTIVE GOAL ID: {active_goal.id}
+                Status: {active_goal.status}
+                
+                METACOGNITION PROTOCOL:
+                If this thought successfully RESOLVES the Active Goal, you MUST end your response with:
+                >> GOAL RESOLVED: [Brief reason]
+                
+                Example:
+                "I have found that the capital is Paris. >> GOAL RESOLVED: Found the answer."
+                """
+
+            full_prompt = prompt + prompt_goal_context
+
+            response = self.llm_client.models.generate_content(
+                model="gemini-2.5-flash", 
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    max_output_tokens=600, # Increased from 300 to prevent truncation
+                    temperature=1.0, 
+                    tools=[search_tool]
+                )
+            )
+            
+            thought_text = response.text.strip()
+            
+            # PARSE COMPLETION TRIGGER
+            if ">> GOAL RESOLVED:" in thought_text:
+                parts = thought_text.split(">> GOAL RESOLVED:")
+                thought_content = parts[0].strip()
+                reason = parts[1].strip()
+                
+                if active_goal:
+                     active_goal.status = "COMPLETED"
+                     logger.info(f"[bold green][METACOGNITION][/bold green] Goal Resolved: {active_goal.description} | Reason: {reason}")
+                     # Trigger immediate consolidation of this victory
+                     thought_text = thought_content # Remove the protocol text from the "thought" to avoid saving it as a memory
+            
+            # Check for stagnation
+            thought_vec = self.encoder.encode(thought_text)
+            if self._check_for_loops(thought_text, thought_vec):
+                # Trigger a "Pivotal Thought" by asking for a complete change in perspective
+                logger.info("[bold cyan][NEURON-X][/bold cyan] Triggering perspective shift due to stagnation...")
+                response = self.llm_client.models.generate_content(
+                    model="gemini-2.5-flash", 
+                    contents="You are stuck in a loop. Think about something completely different or look at your identity from a radically new angle.",
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        max_output_tokens=265,
+                    )
+                )
+                thought_text = f"[PIVOT] {response.text.strip()}"
+                thought_vec = self.encoder.encode(thought_text)
+
+            # Update thought buffer
+            self.thought_buffer.append((thought_text, thought_vec))
+            if len(self.thought_buffer) > self.MAX_THOUGHT_RECURSION:
+                self.thought_buffer.pop(0)
+
+            return thought_text
+
+        except Exception as e:
+            logger.error(f"Failed to generate proactive thought: {e}")
+            return "Internal dissonance detected during reflection."
+
+    def get_current_thought(self):
+        """Returns the most recent proactive thought and its vector, or None."""
+        if self.thought_buffer:
+            return self.thought_buffer[-1]
+        return None, None
+
+    def _extract_triples_batch(self, memories):
+        """
+        Extract semantic triples for a batch of memories in a single LLM call.
+        """
+        if not self.llm_client or not memories:
+            return []
+        
+        # Format memories for the prompt
+        formatted_memories = []
+        for i, m in enumerate(memories):
+            role_desc = "USER input" if m.get('source') == "User_Interaction" else "AI response (Self-Reflection)"
+            formatted_memories.append(f"MEMORY {i} [{role_desc}]: {m['text']}")
+        
+        memories_text = "\n---\n".join(formatted_memories)
+        
+        system_context = """
+            You are a Knowledge Extraction Engine. You will be provided with a BATCH of short-term memories.
+            For EACH memory, extract semantic triples (subject, predicate, object, category).
+            
+            DIRECTIONS:
+            1. Use the 'index' field to correlate each triple with its source memory.
+            2. If a user rejects, denies, or corrects a fact, you MUST use the predicate 'is_incorrect' or 'rejected'.
+            3. Subject and Object should be concise entities (e.g., 'Kaelen', 'Sunblade', 'Wood Elf Rogue').
+            4. Predicate should be a short lowercase relationship (e.g., 'is_a', 'carries', 'located_in').
+            5. IMPORTANT: If the memory source is "AI response" or "Self-Reflection", default to category 'INFERENCE' or 'PROPOSAL'. Only use 'FACTUAL' if the AI is explicitly confirming a known user-fact.
+            """
+        
+        try:
+            response = self.llm_client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=f"EXTRACT FROM THESE MEMORIES:\n{memories_text}",
+                config=types.GenerateContentConfig(
+                    response_mime_type='application/json',
+                    response_schema=ExtractionResponse,
+                    system_instruction=system_context
+                ),
+            )
+            
+            extraction = response.parsed
+            if not extraction or not hasattr(extraction, 'triples'):
+                logger.warning("[bold yellow][NEURON-X][/bold yellow] Empty or invalid response from LLM.")
+                return []
+
+            valid_triples = []
+            for t in extraction.triples:
+                # Map source back based on index
+                idx = t.index
+                source = "Unknown"
+                if 0 <= idx < len(memories):
+                    source = memories[idx].get('source', 'Unknown')
+                
+                valid_triples.append({
+                    "subject": t.subject,
+                    "predicate": t.predicate,
+                    "object": t.object,
+                    "category": t.category,
+                    "source": source
+                })
+            return valid_triples
+            
+        except Exception as e:
+            logger.warning(f"[bold yellow][NEURON-X][/bold yellow] Batch extraction failed: {e}. Falling back to individual processing.")
+            return None # Signal fallback
+
+    def _extract_semantic_triples(self, text):
+        """Extract (subject, predicate, object) triples from text using rule-based NLP."""
+        logger.debug(f"[bold blue][NEURON-X][/bold blue] Extracting semantic triples from: {text[:50]}...")
+        
+        triples = []
+        import re
+        
+        # Helper function to clean extracted entities
+        def clean_entity(s):
+            # Remove trailing punctuation and extra spaces
+            s = re.sub(r'[,;.]$', '', s.strip())
+            # Remove quotes if they wrap the entire string
+            if s.startswith("'") and s.endswith("'"):
+                s = s[1:-1]
+            return s
+        
+        # Pattern: "named 'X'" or 'named "X"' - Extract names from quotes
+        name_pattern = re.compile(r"named\s+['\"]([^'\"]+)['\"]", re.IGNORECASE)
+        for match in name_pattern.finditer(text):
+            name = match.group(1).strip()
+            triples.append(("Self", "has_character_named", name))
+        
+        # Pattern: "X is a Y Z" (capture proper multi-word class like "Wood Elf Rogue")
+        is_a_class_pattern = re.compile(r"\b(?:Level\s+\d+\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s+named", re.IGNORECASE)
+        for match in is_a_class_pattern.finditer(text):
+            char_class = match.group(1).strip()
+            # Try to find the character name in the same sentence
+            name_match = name_pattern.search(text, match.end())
+            if name_match:
+                char_name = name_match.group(1).strip()
+                triples.append((char_name, "is_a", char_class))
+        
+        # Pattern: "X specializes in Y"
+        specializes_pattern = re.compile(r"([A-Z][a-z]+)\s+specializes\s+in\s+['\"]([^'\"]+)['\"]", re.IGNORECASE)
+        for match in specializes_pattern.finditer(text):
+            subject = match.group(1).strip()
+            specialty = match.group(2).strip()
+            triples.append((subject, "specializes_in", specialty))
+        
+        # Pattern: "X carries/has a Y called 'Z'" or "X carries/has Y"
+        has_named_pattern = re.compile(r"([A-Z][a-z]+)\s+(?:carries|has)\s+a\s+(.+?)\s+called\s+['\"]([^'\"]+)['\"]", re.IGNORECASE)
+        for match in has_named_pattern.finditer(text):
+            subject = match.group(1).strip()
+            item_type = clean_entity(match.group(2))
+            item_name = match.group(3).strip()
+            triples.append((subject, "has_weapon", item_name))
+            triples.append((item_name, "is_a", item_type))
+        
+        # Pattern: "called 'X'" or 'called "X"' for locations
+        location_pattern = re.compile(r"(?:city|town|village|place)\s+called\s+['\"]([^'\"]+)['\"]", re.IGNORECASE)
+        for match in location_pattern.finditer(text):
+            location = match.group(1).strip()
+            # Check if it's described as something before
+            prefix_match = re.search(r"(\w+(?:\s+\w+)?)\s+(?:city|town|village)", text[:match.start()])
+            if prefix_match:
+                description = prefix_match.group(1).strip()
+                if description not in ["a", "an", "the", "is"]:
+                    triples.append((location, "is_a", f"{description} city"))
+            triples.append(("Self", "plays_in_location", location))
+        
+        # Pattern: "X is powered by Y"
+        powered_by_pattern = re.compile(r"['\"]([^'\"]+)['\"].*?(?:is\s+)?powered\s+by\s+(.+?)(?:\.|$)", re.IGNORECASE)
+        for match in powered_by_pattern.finditer(text):
+            subject = match.group(1).strip()
+            power_source = clean_entity(match.group(2))
+            triples.append((subject, "powered_by", power_source))
+        
+        # Pattern: "I am playing [a] X" -> Extract what the user is playing
+        playing_pattern = re.compile(r"I\s+am\s+playing\s+(?:a\s+)?(?:Level\s+\d+\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)", re.IGNORECASE)
+        for match in playing_pattern.finditer(text):
+            character_class = match.group(1).strip()
+            if character_class and not character_class.lower() in ["playing", "level"]:
+                triples.append(("Self", "plays_as", character_class))
+        
+        # Pattern: "my X is Y" -> (Self, has_X, Y)
+        my_pattern = re.compile(r"(?:my|our)\s+(\w+)\s+is\s+(.+?)(?:\.|$|,)", re.IGNORECASE)
+        for match in my_pattern.finditer(text):
+            attribute = match.group(1).strip()
+            value = clean_entity(match.group(2))
+            if len(value) > 3:  # Avoid very short matches
+                triples.append(("Self", f"has_{attribute}", value))
+        
+        # Filter out low-quality triples (very short entities, stop words, etc.)
+        stop_words = {"and", "or", "but", "which", "that", "this", "is", "are", "was", "were", "the", "a", "an"}
+        # add german stop words
+        stop_words.update({"und", "oder", "aber", "welche", "dass", "dies", "ist", "sind", "war", "waren", "die", "ein", "eine"})
+        # add french stop words
+        stop_words.update({"et", "ou", "mais", "que", "que", "ce", "est", "sont", "était", "étaient", "la", "un", "une"})
+        filtered_triples = []
+        for subj, pred, obj in triples:
+            if (subj.lower() not in stop_words and 
+                obj.lower() not in stop_words and 
+                len(subj) > 1 and len(obj) > 1):
+                filtered_triples.append((subj, pred, obj))
+        
+        logger.debug(f"[bold blue][NEURON-X][/bold blue] Extracted {len(filtered_triples)} triples: {filtered_triples}")
+        return filtered_triples
+
+    def consolidate(self):
+        """
+        The 'Sleep' function: Moves info from Buffer to Graph with Source-Aware logic.
+        Implements Echo Suppression and Epistemological Conflict Resolution.
+        """
+        # Always sync before consolidation to avoid overwriting newer data
+        self._sync_with_disk()
+
+        if not self.working_memory:
+            return
+
+        logger.info("[bold blue][NEURON-X][/bold blue] Consolidating experiences with [bold magenta]Belief Management[/bold magenta]...")
+        
+        try:
+            # 1. Gather all triples from this batch with their metadata
+            batch_triples = []
+            
+            if self.llm_client:
+                # Try batch extraction first
+                extracted = self._extract_triples_batch(self.working_memory)
+                if extracted is not None:
+                    batch_triples = extracted
+                else:
+                    # Fallback to sequential if batch fails
+                    for memory in self.working_memory:
+                        extracted = self._extract_semantic_triples(memory['text'])
+                        batch_triples.extend([{"subject": s, "predicate": p, "object": o, "category": "FACTUAL", "source": memory.get('source')} for s, p, o in extracted])
+            else:
+                # Fallback for simple regex doesn't support categories yet, treat as FACTUAL
+                for memory in self.working_memory:
+                    fb_triples = self._extract_semantic_triples(memory['text'])
+                    batch_triples.extend([{"subject": s, "predicate": p, "object": o, "category": "FACTUAL", "source": memory.get('source')} for s, p, o in fb_triples])
+
+            # 1.5 PRE-PROCESSING: Strict Hallucination Filtering
+            # Scan for rejections in this batch to prevent the hallucination from being added locally
+            rejected_subjects = set()
+            for t in batch_triples:
+                if t['predicate'] in ["is_hallucination", "is_incorrect", "is_wrong", "rejected"]:
+                    rejected_subjects.add(t['subject'])
+                    logger.info(f"[bold yellow][NEURON-X][/bold yellow] Detected correction for: {t['subject']}")
+
+            # Filter out triples that are about rejected subjects (unless it's the rejection itself)
+            # This handles the case where AI says "X exists" and User says "No X" in the same block.
+            filtered_batch_triples = []
+            for t in batch_triples:
+                # If this triple is asserting something about a rejected subject, skip it
+                if t['subject'] in rejected_subjects and t['predicate'] not in ["is_hallucination", "is_incorrect", "is_wrong", "rejected"]:
+                    logger.info(f"[bold red][NEURON-X][/bold red] Blocked hallucination during consolidation: ({t['subject']}) --[{t['predicate']}]--> ({t['object']})")
+                    continue
+                filtered_batch_triples.append(t)
+            batch_triples = filtered_batch_triples
+
+            # 2. Echo Suppression & Conflict Resolution
+            # Group triples by (subject, predicate) to find duplicates or contradictions
+            processed_triples = []
+            
+            # We prioritize User input over AI reflection in this batch
+            user_claims = [t for t in batch_triples if t['source'] == "User_Interaction"]
+            ai_claims = [t for t in batch_triples if t['source'] == "Self_Reflection"]
+            
+            # Map of (S, P) -> highest authority object
+            final_claims = {}
+            
+            # Helper to generate a unique key for a relationship
+            def get_key(t): 
+                try:
+                    return (t['subject'].lower(), t['predicate'].lower())
+                except KeyError:
+                    return None
+
+            # First, process User claims (Highest Authority)
+            for t in user_claims:
+                key = get_key(t)
+                if key:
+                    final_claims[key] = t # User wins by default
+
+            # Then, process AI claims IF they aren't echoes or contradictions
+            for t in ai_claims:
+                key = get_key(t)
+                if not key:
+                    continue
+                    
+                if key in final_claims:
+                    # Check if it's an ECHO (same object) or CONTRADICTION (different object)
+                    existing = final_claims[key]
+                    if existing.get('object', '').lower() == t.get('object', '').lower():
+                        # Echo suppressed: Don't add AI version, it just inflates weight artificially
+                        continue
+                    else:
+                        # Contradiction: User already defined this (S, P), ignore AI proposal
+                        logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Dissonance suppressed: AI proposed {t.get('object')} for {key}, but User said {existing.get('object')}.")
+                        continue
+                final_claims[key] = t
+
+            # 3. Write to Graph with Category-based Weights
+            weights = {
+                "FACTUAL": 1.0,
+                "INFERENCE": 0.5,
+                "FACTUAL": 1.0,
+                "INFERENCE": 0.5,
+                "PROPOSAL": 0.3,
+                "HYPOTHESIS": 0.2
+            }
+
+            for t in final_claims.values():
+                subj = t.get('subject')
+                pred = t.get('predicate')
+                obj = t.get('object')
+                
+                if not all([subj, pred, obj]):
+                    continue
+                cat = t.get('category', 'FACTUAL')
+                # Ensure category is a string for GEXF serialization and networkx compatibility
+                if hasattr(cat, 'value'):
+                    cat = cat.value
+                else:
+                    cat = str(cat)
+
+                # ENFORCE: AI cannot generate raw FACTS, only INFERENCES or PROPOSALS.
+                # Only the USER can establish axioms.
+                if t.get('source') == 'Self_Reflection' and cat == 'FACTUAL':
+                    cat = 'INFERENCE'
+                
+                # SPECIAL CASE: Negative feedback / Correction
+                # If the predicate suggests something is wrong/incorrect/hallucination
+                if pred.lower() in ["is_hallucination", "is_incorrect", "is_wrong", "rejected"]:
+                    # Lower the weight of ALL edges pointing to this 'subject' if it was a proposal
+                    # Lower the weight of ALL edges pointing to this 'subject'
+                    # We ignore the category check here because if the user says it's wrong, it's wrong.
+                    if subj in self.graph:
+                        for u, v, data in list(self.graph.in_edges(subj, data=True)):
+                            # Penalize heavily to effectively remove it
+                            self.graph[u][v]['weight'] = 0.0 
+                        for u, v, data in list(self.graph.out_edges(subj, data=True)):
+                            self.graph[u][v]['weight'] = 0.0
+                        
+                        # Mark node itself
+                        self.graph.nodes[subj]["status"] = "REJECTED"
+                        logger.info(f"[bold red][NEURON-X][/bold red] Pruned hallucination: {subj}")
+
+                # Ensure nodes exist
+                for node_name in [subj, obj]:
+                    if node_name not in self.graph.nodes():
+                        vec = self.encoder.encode(node_name).tolist()
+                        self.graph.add_node(node_name, content=node_name, vector=json.dumps(vec))
+
+                # Handle edge addition
+                increment = weights.get(cat, 0.5)
+                if self.graph.has_edge(subj, obj):
+                    # Check if relationship matches
+                    if self.graph[subj][obj].get('relation') == pred:
+                        old_w = float(self.graph[subj][obj].get('weight', 1.0))
+                        # Echo suppression happens before this, so this is reinforcement
+                        self.graph[subj][obj]['weight'] = old_w + increment
+                        logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Reinforced: ({subj}) --[{pred}]--> ({obj}) [{old_w+increment:.1f}]")
+                    else:
+                        # Different relation between same nodes? Add secondary edge
+                        self.graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat)
+                else:
+                    self.graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat)
+                    logger.info(f"[bold green][NEURON-X][/bold green] Added: ({subj}) --[{pred}]--> ({obj}) [{cat}]")
+
+            # 4. Save Concept Nodes for context
+            for memory in self.working_memory:
+                c_node = f"Memory_{int(time.time() * 1000)}_{np.random.randint(100, 999)}"
+                self.graph.add_node(c_node, content=memory['text'], vector=json.dumps(memory['vector']))
+                self.graph.add_edge("Self", c_node, relation="remembers")
+
+            # 5. Dream Cycle (Creativity)
+            self._dream_cycle()
+
+        except Exception as e:
+            logger.exception(f"[bold red][ERROR][/bold red] Consolidation failed: {e}")
+
+        self.working_memory = []
+        self.save_graph()
+        self._rebuild_vector_cache()
+
+    def _dream_cycle(self):
+        """
+        The Dreaming Phase: Generates creative hypotheses by connecting unrelated concepts.
+        """
+        if not self.llm_client:
+            return
+
+        logger.info("[bold magenta][NEURON-X][/bold magenta] Entering REM Sleep (Dreaming)...")
+        
+        # 1. Pick two random, unconnected entities
+        all_nodes = [n for n in self.graph.nodes() if not n.startswith("Memory_") and n != "Self"]
+        if len(all_nodes) < 5:
+            return
+            
+        import random
+        # Try 3 times to find a pair
+        for _ in range(3):
+            subj = random.choice(all_nodes)
+            obj = random.choice(all_nodes)
+            
+            if subj == obj or self.graph.has_edge(subj, obj) or self.graph.has_edge(obj, subj):
+                continue
+                
+            # Found a pair!
+            logger.info(f"[bold magenta][NEURON-X][/bold magenta] Dreaming about connection between '{subj}' and '{obj}'...")
+            
+            prompt = f"""
+            You are the Subconscious Creativity Engine of NEURON-X.
+            
+            Task: Invent a CREATIVE, PLAUSIBLE connection between these two concepts:
+            1. {subj}
+            2. {obj}
+            
+            Rules:
+            - This is a "What if?" scenario.
+            - Output specific relationship predicate (e.g., 'might_be_related_to', 'could_be_ancestor_of', 'symbolizes').
+            - Output ONLY the prediction in JSON format: {{"predicate": "relationship", "reasoning": "short explanation"}}
+            """
+            
+            try:
+                response = self.llm_client.models.generate_content(
+                    model="gemini-3-flash-preview",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=1.3 # High temp for dreaming
+                    )
+                )
+                
+                print(response.text)
+
+                result = json.loads(response.text)
+                pred = result.get("predicate", "might_be_related_to")
+                reason = result.get("reasoning", "Dream logic")
+                
+                # Add the Hypothesis
+                self.graph.add_edge(subj, obj, relation=pred, weight=0.2, category="HYPOTHESIS", reasoning=reason)
+                logger.info(f"[bold cyan][NEURON-X][/bold cyan] Created Hypothesis: ({subj}) --[{pred}]--> ({obj})")
+                break # One dream per sleep cycle is enough
+                
+            except Exception as e:
+                logger.warning(f"Dream interrupted: {e}")
+                continue
+
+    def save_graph(self):
+        """Saves current state and updates timestamp to prevent unnecessary reloading."""
+        nx.write_gexf(self.graph, self.graph_file)
+        self.last_sync_time = os.path.getmtime(self.graph_file)
+
+    def get_identity_summary(self):
+        """Queries the graph for core identity and scale of awareness."""
+        nodes = len(self.graph.nodes())
+        edges = len(self.graph.edges())
+        
+        # Pull core identity traits (neighbors of 'Self')
+        core_traits = []
+        if "Self" in self.graph:
+            # We look at what the 'Self' node is connected to (Identity/Aims/etc)
+            for neighbor in self.graph.neighbors("Self"):
+                if neighbor.startswith("Memory_"): # Skip individual memory logs for summary
+                    continue
+                edge_data = self.graph.get_edge_data("Self", neighbor)
+                rel = edge_data.get("relation", "is_related_to")
+                cat = edge_data.get("category", "FACTUAL")
+                core_traits.append(f"({rel}: {neighbor})")
+        
+        import random
+        random.shuffle(core_traits)
+        traits_str = ", ".join(core_traits[:15])
+        return f"Awareness Scale: {nodes} nodes, {edges} edges. Core Identity: {traits_str if traits_str else 'Initializing...'}"
