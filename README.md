@@ -12,11 +12,10 @@ python3 install.py
 ```
 
 ### 2. Configuration
-Create a `.env` file in the root directory (or copy the existing one) and add your Gemini API key:
+Create a `.env` file in the root directory (or copy the `.env.example` file) and add your Gemini API key:
 
 ```env
 GEMINI_API_KEY=your_api_key_here
-GEMINI_MODEL=gemini-2.0-flash-exp
 NEURON_X_LOG_LEVEL=INFO
 
 # Goal Priority Weights (Probabilistic Selection)
@@ -43,6 +42,23 @@ Once installed and configured, you can start the chat interface using:
 ./chat.command
 ```
 *(On macOS, you might need to run `chmod +x chat.command` first.)*
+
+### 4. Background Consciousness (Optional)
+To enable the "Self-Reflection" loop where the AI thinks autonomously in the background:
+
+**Start the Core:**
+```bash
+./start-cognitive-core.command
+```
+This runs `consciousness_loop.py` as a background process, logging its thoughts to `nohup.out`.
+
+**Stop the Core:**
+```bash
+./stop-cognitive-core.command
+```
+
+**⚠️ CRITICAL:** always use the stop command (or `Ctrl+C` if running manually).
+**Why?** The system stores short-term memories in a "Transient Buffer". When you stop the core correctly, it triggers a **Consolidation Event**, where these memories are permanently written to the Graph. Force-quitting will result in **memory loss**.
 
 ---
 
