@@ -842,8 +842,6 @@ class NeuronX:
                         temperature=1.3 # High temp for dreaming
                     )
                 )
-                
-                print(response.text)
 
                 result = json.loads(response.text)
                 pred = result.get("predicate", "might_be_related_to")
