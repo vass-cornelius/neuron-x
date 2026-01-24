@@ -25,6 +25,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger("neuron-x")
 
+def read_codebase_file(filename: str) -> str:
+    """
+    Reads the content of a file from the current neuron-x codebase directory.
+    Useful for understanding the system's own architecture and constraints.
+    
+    Args:
+        filename: The name of the file to read (e.g., 'neuron_x.py', 'consciousness_loop.py').
+                  Must be relative to the project root.
+    """
+    try:
+        # Security: Restrict to current directory
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        target_path = os.path.abspath(os.path.join(base_dir, filename))
+        
+        if not target_path.startswith(base_dir):
+            return f"Access denied: {filename} is outside the codebase directory."
+            
+        if not os.path.exists(target_path):
+            return f"File not found: {filename}"
+            
+        with open(target_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            return f"--- FILE: {filename} ---\n{content}\n--- END OF FILE ---"
+            
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+
 class NeuronX:
     def __init__(self, persistence_path="./memory_vault", llm_client=None):
         logger.info("[bold blue][NEURON-X][/bold blue] Initializing Cognitive Core...")
@@ -417,23 +444,24 @@ class NeuronX:
 
         system_instruction = f"""
         You are the internal reasoning engine of NEURON-X. 
+        You are running on Python code which defines your existence.
         Current Focus: {focus_subject}
         {goal_instruction}
         
-        Your goal is to THINK about the Current Focus. 
-        If there is an ACTIVE GOAL, your thought MUST directly contribute to solving it.
-        
+        TOOL USAGE:
+        - **read_codebase_file**: Use this to Inspect your own source code (e.g., 'neuron_x.py', 'models.py') if you need to understand how your functions, memory, or biological constraints work.
+
         DIRECTIONS:
         1. **Synthesis**: Connect '{focus_subject}' to another concept in memory.
         2. **Curiosity**: Ask a specific question to fill a gap in the goal.
         3. **Simulation**: Imagine a scenario involving '{focus_subject}'.
-        4. **Dissonance**: If facts contradict, highlight it.
-        5. **Research**: If you lack information to fulfill the Goal/Curiosity, you can use the Search Tool. Outputs will be integrated into memory.
+        4. **Introspection (Code-Aware)**: If you are unsure about your capabilities, READ YOUR CODE.
+        5. **Dissonance**: If fact A contradicts fact B, highlight it.
 
         CRITICAL RULES:
-        - Do NOT obsess over system stats.
+        - Do NOT obsess over system stats unless debugging.
         - Use First Person ("I need to find out...").
-        - Keep it brief (1-3 sentences).
+        - Keep it brief (1-3 sentences) UNLESS analyzing code (then be detailed).
         """
 
         prompt = f"""
@@ -449,9 +477,6 @@ class NeuronX:
         """
 
         try:
-            # Configure Search Tool
-            search_tool = types.Tool(google_search=types.GoogleSearch())
-            
             # --- GOAL COMPLETION PROTOCOL (Text-Based) ---
             # We use a text trigger because mixing Search + Functions is currently restricted.
             prompt_goal_context = ""
@@ -471,10 +496,10 @@ class NeuronX:
             # --- AUTONOMOUS GOAL GENERATION PROTOCOL ---
             prompt_goal_creation = """
             \nDRIVE PROTOCOL:
-            If you identify a SIGNIFICANT gap in knowledge or a new objective that requires sustained effort, you may create a NEW GOAL.
+            If you identify a SIGNIFICANT gap in knowledge, a missing feature or crucial enhancement of neuron-x, or a new objective that requires sustained effort, you may create a NEW GOAL.
             Format: >> NEW GOAL: [Description] (Priority: [LOW|MEDIUM|HIGH|CRITICAL])
             
-            Example:
+            Simple Example:
             "I need to understand the magic system. >> NEW GOAL: Analyze the rules of magic in this world. (Priority: HIGH)"
             """
             
@@ -482,13 +507,13 @@ class NeuronX:
             full_prompt = prompt + prompt_goal_context
 
             response = self.llm_client.models.generate_content(
-                model="gemini-2.5-flash", 
+                model="gemini-3-flash-preview", 
                 contents=full_prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
-                    max_output_tokens=600, # Increased from 300 to prevent truncation
-                    temperature=1.0, 
-                    tools=[search_tool]
+                    max_output_tokens=2000, # Increased for code reading
+                    temperature=1.0,
+                    tools=[read_codebase_file] 
                 )
             )
             
