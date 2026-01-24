@@ -321,7 +321,7 @@ class NeuronX:
                     continue
 
                 # FILTER: Skip very low weight edges (weakly refuted) or explicitly hallucinated ones
-                if float(edge_data.get("weight", 1.0)) <= 0.2:
+                if float(edge_data.get("weight", 1.0)) < 0.2:
                     continue
                 if neighbor == "hallucinated entity" or neighbor == "incorrect":
                     continue
@@ -345,7 +345,7 @@ class NeuronX:
                     if relation in bad_relations:
                         continue
 
-                    if float(edge_data.get("weight", 1.0)) <= 0.2:
+                    if float(edge_data.get("weight", 1.0)) < 0.2:
                         continue
                     if pred == "hallucinated entity" or pred == "incorrect":
                         continue
