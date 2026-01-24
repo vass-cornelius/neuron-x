@@ -891,6 +891,13 @@ class NeuronX:
                 "PROPOSAL": 0.3,
                 "HYPOTHESIS": 0.2
             }
+            # Hierarchy for Promotion (Higher number = Higher Truth Value)
+            CATEGORY_HIERARCHY = {
+                "FACTUAL": 4,
+                "INFERENCE": 3,
+                "PROPOSAL": 2,
+                "HYPOTHESIS": 1
+            }
             MAX_WEIGHT = 5.0
 
             for t in final_claims.values():
@@ -933,11 +940,19 @@ class NeuronX:
                         self.graph.nodes[subj]["status"] = "REJECTED"
                         logger.info(f"[bold red][NEURON-X][/bold red] Pruned hallucination: {subj}")
 
-                # Ensure nodes exist
+                # Ensure nodes exist & Handle Re-Awakening
                 for node_name in [subj, obj]:
                     if node_name not in self.graph.nodes():
                         vec = self.encoder.encode(node_name).tolist()
                         self.graph.add_node(node_name, content=node_name, vector=json.dumps(vec))
+                    else:
+                        # RE-AWAKENING PROTOCOL
+                        # If a node was previously REJECTED but we now have FACTUAL evidence for it,
+                        # we must clear the rejection status.
+                        if self.graph.nodes[node_name].get("status") == "REJECTED":
+                            if cat == "FACTUAL" and pred not in ["is_hallucination", "is_incorrect", "is_wrong", "rejected"]:
+                                logger.info(f"[bold green][NEURON-X][/bold green] Re-Awakening Node: '{node_name}' due to FACTUAL reinforcement.")
+                                del self.graph.nodes[node_name]["status"]
 
                 # Handle edge addition
                 increment = weights.get(cat, 0.5)
@@ -963,6 +978,19 @@ class NeuronX:
                             
                         # Update source if it was unknown/different (optional, but good for tracking latest confirmation)
                         self.graph[subj][obj]['source'] = source_tag
+
+                        # CHECK FOR PROMOTION (Epistemological Upgrade)
+                        old_cat = self.graph[subj][obj].get('category', 'FACTUAL')
+                        if hasattr(old_cat, 'value'): old_cat = old_cat.value
+                        
+                        # Get ranks (Default to lowest if unknown)
+                        old_rank = CATEGORY_HIERARCHY.get(old_cat, 0)
+                        new_rank = CATEGORY_HIERARCHY.get(cat, 0)
+                        
+                        if new_rank > old_rank:
+                            self.graph[subj][obj]['category'] = cat
+                            logger.info(f"[bold magenta][NEURON-X][/bold magenta] Promoted Edge: ({subj}) --[{pred}]--> ({obj}) from {old_cat} to {cat}")
+
                     else:
                         # Different relation between same nodes? Add secondary edge
                         self.graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat, source=source_tag)
