@@ -7,6 +7,8 @@ import networkx as nx
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import AgglomerativeClustering
+from sentence_transformers import SentenceTransformer, CrossEncoder
+import difflib
 from dotenv import load_dotenv
 from rich.logging import RichHandler
 from google.genai import types
@@ -62,6 +64,12 @@ class NeuronX:
 
         # The 'Cortex' - Neural Representation
         self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
+        # Multilingual Verification (Cross-Encoder)
+        try:
+            self.cross_encoder = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
+        except Exception as e:
+            logger.warning(f"[bold yellow][NEURON-X][/bold yellow] Failed to load CrossEncoder: {e}. Semantic merging will be limited.")
+            self.cross_encoder = None
         
         # Working Memory (RAM-based short-term)
         self.working_memory = [] 
@@ -979,7 +987,10 @@ class NeuronX:
                 self.graph.add_node(c_node, content=memory['text'], vector=json.dumps(memory['vector']))
                 self.graph.add_edge("Self", c_node, relation="remembers")
 
-            # 5. Dream Cycle (Creativity)
+            # 5. Semantic Entity Merging (Consolidation)
+            self._merge_similar_entities()
+
+            # 6. Dream Cycle (Creativity)
             self._dream_cycle()
 
         except Exception as e:
@@ -988,6 +999,124 @@ class NeuronX:
         self.working_memory = []
         self.save_graph()
         self._rebuild_vector_cache()
+
+    def _verify_pair_identity(self, name_a, name_b):
+        """
+        Uses Cross-Encoder to verify if two names refer to the exact same entity.
+        Returns True if high confidence.
+        """
+        if not self.cross_encoder:
+            return False
+            
+        try:
+            # We treat this as a semantic similarity task
+            score = self.cross_encoder.predict([(name_a, name_b)])
+            # Threshold > 0.85 for "Same Meaning" is conservative but safe
+            return score > 0.80
+        except Exception as e:
+            logger.warning(f"CrossEncoder check failed: {e}")
+            return False
+
+    def _merge_similar_entities(self):
+        """
+        Scans for entities that are likely the same and merges them.
+        STRATEGY:
+        1. High Vector Sim + High Name Sim -> TYPO/VARIATION (Auto Merge)
+        2. Very High Vector Sim + CrossEncoder Verification -> SYNONYM (Merge)
+        """
+        # Get all relevant nodes (Entities only)
+        # We process a snapshot to avoid modifying while iterating
+        entity_nodes = [n for n in self.graph.nodes() 
+                        if not n.startswith("Memory_") and n != "Self" and n != "Knowledge"]
+        
+        if len(entity_nodes) < 2:
+            return
+
+        # Simple O(N^2) for now - can be optimized with Faiss later if needed
+        # Since N is usually small (<1000) for active entities, this is fine.
+        
+        merged_count = 0
+        removals = set()
+        
+        # Sort by length (desc) so we default to keeping the longer/more descriptive name?
+        # Or keeping the one with more edges? Let's sort alphabetically for stability first.
+        entity_nodes.sort() 
+        
+        for i in range(len(entity_nodes)):
+            node_a = entity_nodes[i]
+            if node_a in removals: continue
+            
+            vec_a = self.vector_cache.get(node_a)
+            if vec_a is None: continue
+
+            for j in range(i + 1, len(entity_nodes)):
+                node_b = entity_nodes[j]
+                if node_b in removals: continue
+
+                vec_b = self.vector_cache.get(node_b)
+                if vec_b is None: continue
+
+                # 1. Cosine Similarity
+                sim = np.dot(vec_a, vec_b) / (np.linalg.norm(vec_a) * np.linalg.norm(vec_b) + 1e-9)
+                
+                if sim < 0.90: # Optimization: Skip low sim
+                    continue
+                
+                # 2. Name Similarity (Levenshtein)
+                name_sim = difflib.SequenceMatcher(None, node_a.lower(), node_b.lower()).ratio()
+                
+                should_merge = False
+                reason = ""
+                
+                # CASE A: Typos / Minor Variations (e.g. "Raphael" vs "Rephael")
+                if sim > 0.95 and name_sim > 0.75:
+                    should_merge = True
+                    reason = f"Typo/Var (Vec: {sim:.2f}, Name: {name_sim:.2f})"
+                
+                # CASE B: Synonyms / Translations (e.g. "The Boss" vs "Der Chef")
+                # Requires CrossEncoder check
+                elif sim > 0.90 and self._verify_pair_identity(node_a, node_b):
+                    should_merge = True
+                    reason = f"Semantic Synonym (Vec: {sim:.2f}, Verified)"
+                
+                if should_merge:
+                    # MERGE B into A (Surviving node: A)
+                    # Heuristic: Keep the one with clearer capitalization or more edges?
+                    # For now: Keep A (as it's first in sorted list) unless B is longer?
+                    # Let's keep the one with more edges.
+                    deg_a = self.graph.degree(node_a)
+                    deg_b = self.graph.degree(node_b)
+                    
+                    target, source = (node_a, node_b) if deg_a >= deg_b else (node_b, node_a)
+                    
+                    logger.info(f"[bold magenta][NEURON-X][/bold magenta] Merging '{source}' into '{target}' | Reason: {reason}")
+                    
+                    # Move Edges
+                    # Incoming to Source -> Target
+                    for u, _, data in list(self.graph.in_edges(source, data=True)):
+                        if u == target: continue # Don't create self-loop
+                        if not self.graph.has_edge(u, target):
+                            self.graph.add_edge(u, target, **data)
+                        else:
+                            # Reinforce existing
+                            self.graph[u][target]['weight'] += data.get('weight', 0.0)
+                    
+                    # Outgoing from Source -> Target
+                    for _, v, data in list(self.graph.out_edges(source, data=True)):
+                        if v == target: continue
+                        if not self.graph.has_edge(target, v):
+                            self.graph.add_edge(target, v, **data)
+                        else:
+                            self.graph[target][v]['weight'] += data.get('weight', 0.0)
+                            
+                    self.graph.remove_node(source)
+                    removals.add(source)
+                    merged_count += 1
+                    
+                    # If we merged into 'node_b', node_a is gone, break inner loop
+                    if target == node_b:
+                        removals.add(node_a)
+                        break 
 
     def _dream_cycle(self):
         """

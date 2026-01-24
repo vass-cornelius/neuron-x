@@ -102,6 +102,7 @@ class GeminiNeuronBridge:
             2. **Acknowledge Corrections**: If the USER previously rejected a name or fact, DO NOT reuse it. Look for nodes related to "hallucinated entity" or "rejection" in your memory.
             3. **Relational Consistency**: Ensure that names and relationships form a consistent structure. Inferred relationships must not contradict established facts about "Me/Self".
             4. **Grounded Awareness**: Use the 'RELEVANT LONG-TERM MEMORIES' as hard anchors. If they contradict your internal assumptions, believe the memories.
+            5. If you don't know the answer: **ADMIT IT**. 
             """
             
             grounding_tool = types.Tool(
