@@ -1,4 +1,5 @@
-memory_vault/
+*.gexf
+*.json
 .agent
 __pycache__
 .env
