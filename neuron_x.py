@@ -329,7 +329,8 @@ class NeuronX:
                 all_triples.append({
                     "s": node, "p": edge_data.get("relation", "is_related_to"), 
                     "o": neighbor, "w": float(edge_data.get("weight", 1.0)),
-                    "c": edge_data.get("category", "FACTUAL")
+                    "c": edge_data.get("category", "FACTUAL"),
+                    "r": edge_data.get("reasoning", "")
                 })
             # Incoming
             for pred in self.graph.predecessors(node):
@@ -352,7 +353,8 @@ class NeuronX:
                     all_triples.append({
                         "s": pred, "p": edge_data.get("relation", "is_related_to"), 
                         "o": node, "w": float(edge_data.get("weight", 1.0)),
-                        "c": edge_data.get("category", "FACTUAL")
+                        "c": edge_data.get("category", "FACTUAL"),
+                        "r": edge_data.get("reasoning", "")
                     })
 
         # Sort triples by weight (importance) and limit
@@ -360,6 +362,9 @@ class NeuronX:
         
         for t in all_triples[:top_k * 4]: # Cap the number of triples
             triple_str = f"({t['s']}) --[{t['p']}]--> ({t['o']}) [{t['c']}]"
+            if t.get('r'):
+                triple_str += f" (Reason: {t['r']})"
+
             if triple_str not in seen_triples:
                 extracted_context.append(triple_str)
                 seen_triples.add(triple_str)
@@ -462,6 +467,9 @@ class NeuronX:
         - Do NOT obsess over system stats unless debugging.
         - Use First Person ("I need to find out...").
         - Keep it brief (1-3 sentences) UNLESS analyzing code (then be detailed).
+
+        SELF-VERIFICATION PROTOCOL:
+        - If making claims about internal architecture (weights, _dream_cycle, code behavior), you MUST use `read_codebase_file` to verify the code first.
         """
 
         prompt = f"""
@@ -772,6 +780,8 @@ class NeuronX:
             # 1. Gather all triples from this batch with their metadata
             batch_triples = []
             
+            PROTECTED_NODES = {"Self", "Knowledge"}
+            
             if self.llm_client:
                 # Try batch extraction first
                 extracted = self._extract_triples_batch(self.working_memory)
@@ -890,6 +900,10 @@ class NeuronX:
                     # Lower the weight of ALL edges pointing to this 'subject'
                     # We ignore the category check here because if the user says it's wrong, it's wrong.
                     if subj in self.graph:
+                        if subj in PROTECTED_NODES:
+                            logger.warning(f"[bold yellow][NEURON-X][/bold yellow] Protected Core Node '{subj}' cannot be rejected.")
+                            continue
+
                         for u, v, data in list(self.graph.in_edges(subj, data=True)):
                             # Penalize heavily to effectively remove it
                             self.graph[u][v]['weight'] = 0.0 
