@@ -149,5 +149,50 @@ class TestPromotion(unittest.TestCase):
         
         self.assertIsNone(node_data.get('status'), "Status should be cleared (None)")
 
+    def test_entropy_decay(self):
+        print("\n--- Testing Entropy Decay ---")
+        # 1. Setup High Confidence Node
+        subj = "Sun"
+        obj = "Hot"
+        self.bot.graph.add_node(subj)
+        self.bot.graph.add_node(obj)
+        # Weight > 3.5 to trigger decay
+        initial_weight = 4.5
+        self.bot.graph.add_edge(subj, obj, relation="is", weight=initial_weight, category="FACTUAL")
+        
+        print(f"Initial State: {self.bot.graph[subj][obj]}")
+        
+        # 2. Run Consolidate with UNRELATED memory
+        # This means Sun->Hot is NOT reinforced.
+        self.bot.working_memory = [{"text": "Ice is cold.", "source": "User_Interaction", "vector": [0.1]*384}]
+        
+        # Mock extraction to return Ice->Cold, NOT Sun->Hot to ensure it's not reinforced
+        target_triple = [{"subject": "Ice", "predicate": "is", "object": "Cold", "category": "FACTUAL", "source": "User_Interaction"}]
+        self.bot._extract_triples_batch = MagicMock(return_value=target_triple)
+        self.bot.llm_client = True 
+        
+        self.bot.consolidate()
+        
+        # 3. Verify Decay
+        data = self.bot.graph[subj][obj]
+        new_weight = float(data['weight'])
+        print(f"Post-Entropy State: {data}")
+        
+        self.assertLess(new_weight, initial_weight, "Weight should have decayed")
+        self.assertGreater(new_weight, 3.0, "Weight should not drop below floor instantly")
+
+        # 4. Verify Reinforcement works again
+        # Now we reinforce it
+        self.bot.working_memory = [{"text": "The Sun is Hot.", "source": "User_Interaction", "vector": [0.1]*384}]
+        reinforce_triple = [{"subject": "Sun", "predicate": "is", "object": "Hot", "category": "FACTUAL", "source": "User_Interaction"}]
+        self.bot._extract_triples_batch = MagicMock(return_value=reinforce_triple)
+
+        self.bot.consolidate()
+        
+        final_data = self.bot.graph[subj][obj]
+        print(f"Post-Reinforcement State: {final_data}")
+        self.assertGreater(float(final_data['weight']), new_weight, "Weight should increase after reinforcement")
+
+
 if __name__ == '__main__':
     unittest.main()

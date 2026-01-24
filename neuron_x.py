@@ -1027,10 +1027,14 @@ class NeuronX:
                 self.graph.add_node(c_node, content=memory['text'], vector=json.dumps(memory['vector']))
                 self.graph.add_edge("Self", c_node, relation="remembers")
 
-            # 5. Semantic Entity Merging (Consolidation)
+            # 5. Apply Cognitive Entropy (Weight Decay)
+            # This prevents high-weight axioms from becoming permanent "Gravity Wells"
+            self._apply_entropy(reinforced_edges=list(final_claims.values()))
+
+            # 6. Semantic Entity Merging (Consolidation)
             self._merge_similar_entities()
 
-            # 6. Dream Cycle (Creativity)
+            # 7. Dream Cycle (Creativity)
             self._dream_cycle()
 
         except Exception as e:
@@ -1223,6 +1227,65 @@ class NeuronX:
             except Exception as e:
                 logger.warning(f"Dream interrupted: {e}")
                 continue
+
+    def _apply_entropy(self, reinforced_edges):
+        """
+        Applies a small decay to high-weight edges that were NOT reinforced this cycle.
+        This prevents 'Gravity Wells' where a belief becomes irrefutable.
+        
+        Args:
+            reinforced_edges: A set/list of edge dictionaries (or objects) that were reinforced.
+                            We expect they might be the raw dictionaries from 'final_claims'.
+        """
+        if not self.graph.number_of_edges():
+            return
+
+        # Convert reinforced data to a set of (u, v) tuples for fast O(1) lookup.
+        # Track both (u, v) and (u, v, key) if possible, but simplicity first.
+        # In final_claims we have dicts with 'subject', 'object', 'predicate'.
+        
+        active_pairs = set()
+        for item in reinforced_edges:
+            # item is a dict from final_claims
+            s = item.get('subject')
+            o = item.get('object')
+            if s and o:
+                active_pairs.add((s, o))
+
+        MAX_WEIGHT = 5.0
+        DECAY_RATE = 0.05 # 5% of the distance to zero? Or fixed amount? 
+        # Let's use a small fixed amount scaled by current certainty.
+        
+        updates = []
+        
+        for u, v, data in self.graph.edges(data=True):
+            current_w = float(data.get('weight', 1.0))
+            
+            # Only decay "Established" beliefs to force them to prove their worth.
+            # Low weight hypotheses (e.g. 0.2) shouldn't decay to zero instantly.
+            # We target High Weight anchors > 3.0
+            if current_w > 3.5:
+                # Check if it was active
+                if (u, v) in active_pairs:
+                    continue
+                    
+                # Apply Entropy
+                # The higher the weight, the more 'energy' it needs to maintain.
+                # Decay = Base * (Weight / Max)
+                decay = DECAY_RATE * (current_w / MAX_WEIGHT)
+                new_w = current_w - decay
+                
+                # Cap minimum for these established nodes so they don't vanish overnight
+                # unless rejected.
+                if new_w < 3.0: new_w = 3.0 
+                
+                if new_w != current_w:
+                    updates.append((u, v, new_w))
+
+        if updates:
+            logger.info(f"[bold magenta][ENTROPY][/bold magenta] Decaying {len(updates)} stagnant high-certainty beliefs.")
+            for u, v, w in updates:
+                self.graph[u][v]['weight'] = w
 
     def save_graph(self):
         """Saves current state and updates timestamp to prevent unnecessary reloading."""
