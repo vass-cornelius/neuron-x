@@ -334,9 +334,15 @@ class NeuronX:
                 if neighbor == "hallucinated entity" or neighbor == "incorrect":
                     continue
                     
+                    
+                # BIOLOGICAL ANCHOR: Boost weight for developmental dependencies
+                weight = float(edge_data.get("weight", 1.0))
+                if relation in {"parent_of", "child_of", "ancestor_of", "descendant_of", "mother_of", "father_of", "son_of", "daughter_of"}:
+                    weight *= 2.0
+
                 all_triples.append({
                     "s": node, "p": edge_data.get("relation", "is_related_to"), 
-                    "o": neighbor, "w": float(edge_data.get("weight", 1.0)),
+                    "o": neighbor, "w": weight,
                     "c": edge_data.get("category", "FACTUAL"),
                     "r": edge_data.get("reasoning", "")
                 })
@@ -358,9 +364,15 @@ class NeuronX:
                     if pred == "hallucinated entity" or pred == "incorrect":
                         continue
                         
+                    
+                    # BIOLOGICAL ANCHOR: Boost weight for developmental dependencies
+                    weight = float(edge_data.get("weight", 1.0))
+                    if relation in {"parent_of", "child_of", "ancestor_of", "descendant_of", "mother_of", "father_of", "son_of", "daughter_of"}:
+                        weight *= 2.0
+
                     all_triples.append({
                         "s": pred, "p": edge_data.get("relation", "is_related_to"), 
-                        "o": node, "w": float(edge_data.get("weight", 1.0)),
+                        "o": node, "w": weight,
                         "c": edge_data.get("category", "FACTUAL"),
                         "r": edge_data.get("reasoning", "")
                     })
@@ -1128,7 +1140,11 @@ class NeuronX:
         logger.info("[bold magenta][NEURON-X][/bold magenta] Entering REM Sleep (Dreaming)...")
         
         # 1. Pick two random, unconnected entities
-        all_nodes = [n for n in self.graph.nodes() if not n.startswith("Memory_") and n != "Self"]
+        # FILTER: Exclude REJECTED nodes from sleeping constructs
+        all_nodes = [n for n in self.graph.nodes() 
+                     if not n.startswith("Memory_") 
+                     and n != "Self"
+                     and self.graph.nodes[n].get("status") != "REJECTED"]
         if len(all_nodes) < 5:
             return
             
