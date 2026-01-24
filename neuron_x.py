@@ -868,11 +868,10 @@ class NeuronX:
             weights = {
                 "FACTUAL": 1.0,
                 "INFERENCE": 0.5,
-                "FACTUAL": 1.0,
-                "INFERENCE": 0.5,
                 "PROPOSAL": 0.3,
                 "HYPOTHESIS": 0.2
             }
+            MAX_WEIGHT = 5.0
 
             for t in final_claims.values():
                 subj = t.get('subject')
@@ -928,11 +927,22 @@ class NeuronX:
                     # Check if relationship matches
                     if self.graph[subj][obj].get('relation') == pred:
                         old_w = float(self.graph[subj][obj].get('weight', 1.0))
+                        
                         # Echo suppression happens before this, so this is reinforcement
-                        self.graph[subj][obj]['weight'] = old_w + increment
+                        # ASYMPTOTIC SATURATION to prevent Gravity Wells
+                        # Formula: new_w = old_w + increment * (1 - old_w / MAX_WEIGHT)
+                        if old_w < MAX_WEIGHT:
+                            saturation_factor = 1.0 - (old_w / MAX_WEIGHT)
+                            if saturation_factor < 0: saturation_factor = 0
+                            
+                            new_w = old_w + (increment * saturation_factor)
+                            self.graph[subj][obj]['weight'] = new_w
+                            logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Reinforced: ({subj}) --[{pred}]--> ({obj}) [{old_w:.2f} -> {new_w:.2f}]")
+                        else:
+                            logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Max Saturation: ({subj}) --[{pred}]--> ({obj}) [Weight: {old_w:.2f}]")
+                            
                         # Update source if it was unknown/different (optional, but good for tracking latest confirmation)
                         self.graph[subj][obj]['source'] = source_tag
-                        logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Reinforced: ({subj}) --[{pred}]--> ({obj}) [{old_w+increment:.1f}]")
                     else:
                         # Different relation between same nodes? Add secondary edge
                         self.graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat, source=source_tag)
