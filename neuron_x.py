@@ -41,6 +41,7 @@ class NeuronX:
         
         # Relational Graph (The Self-Node Architecture)
         self.graph_file = os.path.join(self.path, "synaptic_graph.gexf")
+        self.goals_file = os.path.join(self.path, "goals.json")
         self.last_sync_time = 0
         self._load_graph()
         
@@ -51,14 +52,38 @@ class NeuronX:
         # Stagnation Detection - Last few proactive thoughts
         self.thought_buffer = []
         self.MAX_THOUGHT_RECURSION = 5
+        self.RECURSIVE_THOUGHT_THRESHOLD = float(os.getenv("RECURSIVE_THOUGHT_THRESHOLD", "0.95"))
         
         # Focus History to prevent topic repetition
         self.focus_history = []
         self.MAX_FOCUS_HISTORY = 20
 
         # Goal System (Drive)
+        # Goal System (Drive)
         self.goals = []
-        self._initialize_default_goals()
+        self._load_goals()
+
+    def _load_goals(self):
+        """Loads goals from disk or initializes defaults."""
+        if os.path.exists(self.goals_file):
+            try:
+                with open(self.goals_file, 'r') as f:
+                    data = json.load(f)
+                    self.goals = [Goal(**g) for g in data]
+                logger.info(f"[bold blue][NEURON-X][/bold blue] Drives restored | [bold cyan]{len(self.goals)}[/bold cyan] active goals.")
+            except Exception as e:
+                logger.error(f"Failed to load goals: {e}")
+                self._initialize_default_goals()
+        else:
+            self._initialize_default_goals()
+
+    def _save_goals(self):
+        """Persists current goals to disk."""
+        try:
+            with open(self.goals_file, 'w') as f:
+                json.dump([g.dict() for g in self.goals], f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save goals: {e}")
 
     def _load_graph(self):
         """Loads the graph from disk and updates the sync timestamp."""
@@ -111,11 +136,13 @@ class NeuronX:
         if not self.goals:
             self.add_goal("Expand the knowledge graph by discovering new entities.", priority=GoalPriority.LOW)
             self.add_goal("Maintain internal consistency by resolving contradictions.", priority=GoalPriority.MEDIUM)
+            self._save_goals()
 
     def add_goal(self, description, priority=GoalPriority.MEDIUM):
         """Adds a new goal to the drive system."""
         goal = Goal(description=description, priority=priority)
         self.goals.append(goal)
+        self._save_goals()
         logger.info(f"[bold magenta][NEURON-X][/bold magenta] New Goal Acquired: {description} [{priority}]")
 
     def get_bg_goal(self):
@@ -137,6 +164,9 @@ class NeuronX:
         # Select one
         try:
             chosen_goal = random.choices(pending_goals, weights=weights, k=1)[0]
+            # log pending goals
+            logger.info(f"[bold magenta][NEURON-X][/bold magenta] Pending Goals: {len(pending_goals)}")
+            logger.info(f"[bold magenta][NEURON-X][/bold magenta] Selected Goal: {chosen_goal.description} [{chosen_goal.priority}]")
             return chosen_goal
         except IndexError:
             return pending_goals[0]
@@ -222,12 +252,47 @@ class NeuronX:
                 if pred != "Self":
                     expanded_entities.add(pred)
         
+        # 2.5 Identify BLOCKED relationships (Negative Constraints)
+        # If A -> B is "is_incorrect", then A -> B (is) should also be ignored.
+        bad_relations = {
+            "is_incorrect", "is_hallucination", "is_wrong", "rejected", 
+            "was_incorrectly_identified_as", "incorrectly_identified_as",
+            "is_not", "contrasts", "conflicts_with", "hallucinated",
+            "is_not_related_to", "is_distinct_from", "has_distinct_domain_from"
+        }
+        blocked_pairs = set()
+        
+        for node in expanded_entities:
+            # Check outgoing
+            for neighbor in self.graph.neighbors(node):
+                edge_data = self.graph.get_edge_data(node, neighbor)
+                rel = edge_data.get("relation", "").lower()
+                if rel in bad_relations:
+                    blocked_pairs.add(tuple(sorted((node, neighbor))))
+            
+            # Check incoming
+            for pred in self.graph.predecessors(node):
+                edge_data = self.graph.get_edge_data(pred, node)
+                rel = edge_data.get("relation", "").lower()
+                if rel in bad_relations:
+                    blocked_pairs.add(tuple(sorted((pred, node))))
+
         # 3. Collect Triples for expanded entities
         all_triples = []
         for node in expanded_entities:
             # Outgoing
             for neighbor in self.graph.neighbors(node):
+                # Check for blocking
+                if tuple(sorted((node, neighbor))) in blocked_pairs:
+                    continue
+
                 edge_data = self.graph.get_edge_data(node, neighbor)
+                relation = edge_data.get("relation", "is_related_to").lower()
+                
+                # Double-check negative predicates just in case (redundant but safe)
+                if relation in bad_relations:
+                    continue
+
                 # FILTER: Skip very low weight edges (weakly refuted) or explicitly hallucinated ones
                 if float(edge_data.get("weight", 1.0)) <= 0.2:
                     continue
@@ -242,7 +307,16 @@ class NeuronX:
             # Incoming
             for pred in self.graph.predecessors(node):
                 if pred not in expanded_entities:
+                    # Check for blocking
+                    if tuple(sorted((pred, node))) in blocked_pairs:
+                        continue
+
                     edge_data = self.graph.get_edge_data(pred, node)
+                    relation = edge_data.get("relation", "is_related_to").lower()
+                    
+                    if relation in bad_relations:
+                        continue
+
                     if float(edge_data.get("weight", 1.0)) <= 0.2:
                         continue
                     if pred == "hallucinated entity" or pred == "incorrect":
@@ -277,8 +351,8 @@ class NeuronX:
             v_norm = np.linalg.norm(t_vec) + 1e-9
             similarity = np.dot(vector, t_vec) / (q_norm * v_norm)
             
-            if similarity > 0.95:
-                logger.warning(f"[bold yellow][NEURON-X][/bold yellow] Recursive thought detected: [dim]{text[:50]}...[/dim]")
+            if similarity > self.RECURSIVE_THOUGHT_THRESHOLD:
+                logger.warning(f"[bold yellow][NEURON-X][/bold yellow] Recursive thought detected: [dim]{text[:150]}...[/dim]")
                 return True
         return False
 
@@ -300,7 +374,7 @@ class NeuronX:
         goal_instruction = ""
         
         if active_goal:
-            goal_instruction = f"ACTIVE GOAL: {active_goal.description} (Priority: {active_goal.priority})"
+            goal_instruction = f"ACTIVE GOAL: {active_goal.description} (Priority: {active_goal.priority.value})"
             context_query = active_goal.description
             # Try to find a subject in the goal description
             # Simple heuristic: look for capitalized words that are in the graph
@@ -394,6 +468,17 @@ class NeuronX:
                 "I have found that the capital is Paris. >> GOAL RESOLVED: Found the answer."
                 """
 
+            # --- AUTONOMOUS GOAL GENERATION PROTOCOL ---
+            prompt_goal_creation = """
+            \nDRIVE PROTOCOL:
+            If you identify a SIGNIFICANT gap in knowledge or a new objective that requires sustained effort, you may create a NEW GOAL.
+            Format: >> NEW GOAL: [Description] (Priority: [LOW|MEDIUM|HIGH|CRITICAL])
+            
+            Example:
+            "I need to understand the magic system. >> NEW GOAL: Analyze the rules of magic in this world. (Priority: HIGH)"
+            """
+            
+            full_prompt = prompt + prompt_goal_context + prompt_goal_creation
             full_prompt = prompt + prompt_goal_context
 
             response = self.llm_client.models.generate_content(
@@ -417,11 +502,38 @@ class NeuronX:
                 
                 if active_goal:
                      active_goal.status = "COMPLETED"
+                     self._save_goals()
                      logger.info(f"[bold green][METACOGNITION][/bold green] Goal Resolved: {active_goal.description} | Reason: {reason}")
                      # Trigger immediate consolidation of this victory
-                     thought_text = thought_content # Remove the protocol text from the "thought" to avoid saving it as a memory
-            
-            # Check for stagnation
+                     thought_text = thought_content
+
+            # PARSE CREATION TRIGGER
+            if ">> NEW GOAL:" in thought_text:
+                parts = thought_text.split(">> NEW GOAL:")
+                thought_content = parts[0].strip() # Keep the thought part
+                goal_data = parts[1].strip()
+                
+                # Extract Description and Priority
+                # Format: [Description] (Priority: [PRIORITY])
+                import re
+                match = re.search(r"^(.*?)\s*\(Priority:\s*(.*?)\)", goal_data, re.IGNORECASE)
+                if match:
+                    desc = match.group(1).strip()
+                    prio_str = match.group(2).strip().upper()
+                    try:
+                        prio = GoalPriority[prio_str]
+                    except KeyError:
+                        prio = GoalPriority.MEDIUM
+                    
+                    self.add_goal(desc, priority=prio)
+                    # Clean up thought text to avoid saving the protocol string
+                    thought_text = thought_content
+                else:
+                    # Fallback if parsing fails slightly
+                    self.add_goal(goal_data, priority=GoalPriority.MEDIUM)
+                    thought_text = thought_content
+
+            return thought_text
             thought_vec = self.encoder.encode(thought_text)
             if self._check_for_loops(thought_text, thought_vec):
                 # Trigger a "Pivotal Thought" by asking for a complete change in perspective
@@ -475,10 +587,12 @@ class NeuronX:
             
             DIRECTIONS:
             1. Use the 'index' field to correlate each triple with its source memory.
-            2. If a user rejects, denies, or corrects a fact, you MUST use the predicate 'is_incorrect' or 'rejected'.
-            3. Subject and Object should be concise entities (e.g., 'Kaelen', 'Sunblade', 'Wood Elf Rogue').
-            4. Predicate should be a short lowercase relationship (e.g., 'is_a', 'carries', 'located_in').
-            5. IMPORTANT: If the memory source is "AI response" or "Self-Reflection", default to category 'INFERENCE' or 'PROPOSAL'. Only use 'FACTUAL' if the AI is explicitly confirming a known user-fact.
+            2. **NEGATION HANDLING**: If a user rejects, denies, or corrects a fact, or explicitly states two things are NOT related, you MUST use negative predicates like 'is_incorrect', 'rejected', 'is_not_related_to', or 'is_distinct_from'.
+            3. **DOMAIN DISTINCTION**: Distinguish between Operational Tools (e.g., 'Hammer', 'Keyboard') and Abstract Concepts (e.g., 'Trolley Problem'). If the user contrasts them, use 'has_distinct_domain_from' or 'is_not_related_to'. DO NOT create a factual 'is_related_to' link just because they appear in the same sentence.
+            4. **MULTI-LINGUAL**: Supports DE/FR/EN input. Ensure negations (e.g., 'nicht', 'kein', 'pas', 'not', 'no') are correctly captured as negative predicates.
+            5. Subject and Object should be concise entities.
+            6. Predicate should be a short lowercase relationship (e.g., 'is_a', 'carries', 'located_in').
+            7. IMPORTANT: If the memory source is "AI response" or "Self-Reflection", default to category 'INFERENCE' or 'PROPOSAL'. Only use 'FACTUAL' if the AI is explicitly confirming a known user-fact.
             """
         
         try:
@@ -653,7 +767,7 @@ class NeuronX:
             # Scan for rejections in this batch to prevent the hallucination from being added locally
             rejected_subjects = set()
             for t in batch_triples:
-                if t['predicate'] in ["is_hallucination", "is_incorrect", "is_wrong", "rejected"]:
+                if t['predicate'] in ["is_hallucination", "is_incorrect", "is_wrong", "rejected", "is_not_related_to", "is_distinct_from", "has_distinct_domain_from"]:
                     rejected_subjects.add(t['subject'])
                     logger.info(f"[bold yellow][NEURON-X][/bold yellow] Detected correction for: {t['subject']}")
 
@@ -662,7 +776,7 @@ class NeuronX:
             filtered_batch_triples = []
             for t in batch_triples:
                 # If this triple is asserting something about a rejected subject, skip it
-                if t['subject'] in rejected_subjects and t['predicate'] not in ["is_hallucination", "is_incorrect", "is_wrong", "rejected"]:
+                if t['subject'] in rejected_subjects and t['predicate'] not in ["is_hallucination", "is_incorrect", "is_wrong", "rejected", "is_not_related_to", "is_distinct_from", "has_distinct_domain_from"]:
                     logger.info(f"[bold red][NEURON-X][/bold red] Blocked hallucination during consolidation: ({t['subject']}) --[{t['predicate']}]--> ({t['object']})")
                     continue
                 filtered_batch_triples.append(t)
@@ -675,6 +789,11 @@ class NeuronX:
             # We prioritize User input over AI reflection in this batch
             user_claims = [t for t in batch_triples if t['source'] == "User_Interaction"]
             ai_claims = [t for t in batch_triples if t['source'] == "Self_Reflection"]
+            
+            # Defensive Code: Warn about dropped memories
+            for t in batch_triples:
+                if t['source'] not in ["User_Interaction", "Self_Reflection", "Unknown"]:
+                    logger.warning(f"[bold yellow][NEURON-X][/bold yellow] Unknown source '{t['source']}' for triple ({t['subject']}) -> ({t['object']}). It will be ignored.")
             
             # Map of (S, P) -> highest authority object
             final_claims = {}
@@ -764,22 +883,49 @@ class NeuronX:
 
                 # Handle edge addition
                 increment = weights.get(cat, 0.5)
+                source_tag = t.get('source', 'Unknown')
+                
                 if self.graph.has_edge(subj, obj):
                     # Check if relationship matches
                     if self.graph[subj][obj].get('relation') == pred:
                         old_w = float(self.graph[subj][obj].get('weight', 1.0))
                         # Echo suppression happens before this, so this is reinforcement
                         self.graph[subj][obj]['weight'] = old_w + increment
+                        # Update source if it was unknown/different (optional, but good for tracking latest confirmation)
+                        self.graph[subj][obj]['source'] = source_tag
                         logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Reinforced: ({subj}) --[{pred}]--> ({obj}) [{old_w+increment:.1f}]")
                     else:
                         # Different relation between same nodes? Add secondary edge
-                        self.graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat)
+                        self.graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat, source=source_tag)
                 else:
-                    self.graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat)
+                    self.graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat, source=source_tag)
                     logger.info(f"[bold green][NEURON-X][/bold green] Added: ({subj}) --[{pred}]--> ({obj}) [{cat}]")
 
             # 4. Save Concept Nodes for context
+            # 4. Save Concept Nodes for context
             for memory in self.working_memory:
+                # DEDUPLICATION: Check if this memory already exists
+                is_duplicate = False
+                
+                # Check against previously existing nodes in vector_cache
+                mem_vector = np.array(memory['vector'])
+                
+                if self.vector_cache:
+                     for node_name, vec in self.vector_cache.items():
+                        if not node_name.startswith("Memory_"):
+                            continue
+                        
+                        # Dot product for similarity
+                        sim = np.dot(mem_vector, vec) / (np.linalg.norm(mem_vector) * np.linalg.norm(vec) + 1e-9)
+                        
+                        if sim > 0.95: # High threshold for "basically same thought"
+                            logger.info(f"[bold yellow][NEURON-X][/bold yellow] Duplicate memory suppressed: {memory['text'][:50]}... (Sim: {sim:.3f})")
+                            is_duplicate = True
+                            break
+                
+                if is_duplicate:
+                    continue
+
                 c_node = f"Memory_{int(time.time() * 1000)}_{np.random.randint(100, 999)}"
                 self.graph.add_node(c_node, content=memory['text'], vector=json.dumps(memory['vector']))
                 self.graph.add_edge("Self", c_node, relation="remembers")

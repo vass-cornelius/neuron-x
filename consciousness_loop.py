@@ -54,7 +54,7 @@ def run_awareness_loop():
             print(f"\033[1;36m[THOUGHT]\033[0m {thought}", flush=True)
             
             # 2. Perception: Ingest the thought as a new memory
-            brain.perceive(f"Self-Reflection: {thought}", source="Introspection")
+            brain.perceive(f"Self-Reflection: {thought}", source="Self_Reflection")
             
             # 3. Recursive Reasoning: Occasionally refine the thought (simulate deep focus)
             # This happens internally through the perceive call and subsequent loops,
