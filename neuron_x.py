@@ -475,13 +475,40 @@ class NeuronX:
         
         # 3. Serendipity: Retrieve random unrelated concepts
         all_entities = [n for n in self.graph.nodes() if not n.startswith("Memory_") and n != "Self"]
-        random_concepts = []
+        random_concepts_details = []
+        
         if len(all_entities) > 5:
             candidates = [e for e in all_entities if e != focus_subject]
             if candidates:
-                random_concepts = random.sample(candidates, min(len(candidates), 3))
-        
-        random_concepts_str = ", ".join(random_concepts) if random_concepts else "None available yet"
+                selected = random.sample(candidates, min(len(candidates), 3))
+                
+                for concept in selected:
+                    # Fetch defining context (Vignette)
+                    vignette = ""
+                    # Priority 1: Definitions (is_a, type_of)
+                    defining_edges = []
+                    other_edges = []
+                    
+                    if concept in self.graph:
+                        for neighbor in self.graph.neighbors(concept):
+                            edge_data = self.graph.get_edge_data(concept, neighbor)
+                            rel = edge_data.get("relation", "").lower()
+                            if rel in ["is", "context", "functions_as", "facilitates", "is_about", "indicates", "is_a", "type_of", "defined_as", "is_an", "is_instance_of", "is_type_of", "is_definition_of"]:
+                                defining_edges.append(f"{rel} {neighbor}")
+                            else:
+                                other_edges.append(f"{rel} {neighbor}")
+                    
+                    if defining_edges:
+                        vignette = defining_edges[0]
+                    elif other_edges:
+                        vignette = random.choice(other_edges)
+                    
+                    if vignette:
+                        random_concepts_details.append(f"- {concept} ({vignette})")
+                    else:
+                        random_concepts_details.append(f"- {concept}")
+
+        random_concepts_str = "\n".join(random_concepts_details) if random_concepts_details else "None available yet"
 
         summary = self.get_identity_summary()
 
