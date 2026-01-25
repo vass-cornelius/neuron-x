@@ -239,23 +239,6 @@ class NeuronX:
         similarity_threshold = 0.4
         edge_weight_threshold = 0.2
         
-        feedback_weight = 0.0
-        has_anchor = False
-        
-        if self.graph.has_edge("Self", "Physical Feedback"):
-            feedback_weight = float(self.graph["Self"]["Physical Feedback"].get("weight", 0.0))
-            has_anchor = True
-        elif self.graph.has_edge("Physical Feedback", "Self"):
-            feedback_weight = float(self.graph["Physical Feedback"]["Self"].get("weight", 0.0))
-            has_anchor = True
-            
-        if has_anchor:
-            # Scale based on weight (max ~5.0)
-            focus_coefficient = min(feedback_weight / 5.0, 1.0)
-            similarity_threshold = 0.2 + (0.4 * focus_coefficient)
-            edge_weight_threshold = 0.2 * focus_coefficient
-            logger.debug(f"[bold cyan][NEURON-X][/bold cyan] Dynamic Focus | ({similarity_threshold:.2f}, {edge_weight_threshold:.2f})")
-
         query_vector = self.encoder.encode(text)
         
         node_names = []
@@ -314,7 +297,8 @@ class NeuronX:
             "is_incorrect", "is_hallucination", "is_wrong", "rejected", 
             "was_incorrectly_identified_as", "incorrectly_identified_as",
             "is_not", "contrasts", "conflicts_with", "hallucinated",
-            "is_not_related_to", "is_distinct_from", "has_distinct_domain_from"
+            "is_not_related_to", "is_distinct_from", "has_distinct_domain_from",
+            "is_not_a", "is_not_an", "is_not_a_kind_of", "is_not_a_type_of",
         }
         blocked_pairs = set()
         
@@ -508,10 +492,10 @@ class NeuronX:
         {goal_instruction}
         
         TOOL USAGE:
-        - **read_codebase_file**: Use this to Inspect your own source code (e.g., 'neuron_x.py', 'models.py') if you need to understand how your functions, memory, or biological constraints work.
+        - **read_codebase_file**: Use this to Inspect your own source code (e.g., 'neuron_x.py', 'models.py', 'gemini_interface.py') if you need to understand how your functions, memory, or biological constraints work.
 
         DIRECTIONS:
-        1. **Synthesis**: Connect '{focus_subject}' to another concept in memory.
+        1. **Synthesis**: Connect '{focus_subject}' to any other concept in memory.
         2. **Curiosity**: Ask a specific question to fill a gap in the goal.
         3. **Simulation**: Imagine a scenario involving '{focus_subject}'.
         4. **Introspection (Code-Aware)**: If you are unsure about your capabilities, READ YOUR CODE.
