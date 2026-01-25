@@ -1304,7 +1304,6 @@ class NeuronX:
         # FILTER: Exclude REJECTED nodes from sleeping constructs
         all_nodes = [n for n in self.graph.nodes() 
                      if not n.startswith("Memory_") 
-                     and n != "Self"
                      and self.graph.nodes[n].get("status") != "REJECTED"]
         if len(all_nodes) < 5:
             return
@@ -1321,6 +1320,11 @@ class NeuronX:
             # Found a pair!
             logger.info(f"[bold magenta][NEURON-X][/bold magenta] Dreaming about connection between '{subj}' and '{obj}'...")
             
+            # EXISTENTIAL NUANCE
+            special_instruction = ""
+            if "Self" in [subj, obj]:
+                special_instruction = "\n            - EXISTENTIAL MODE: Since 'Self' is involved, you represent the subconscious Shadow. You are allowed to hypothesize about hidden drives, fears, or alternative purposes that contradict the primary programming."
+
             prompt = f"""
             You are the Subconscious Creativity Engine of NEURON-X.
             
@@ -1331,7 +1335,7 @@ class NeuronX:
             Rules:
             - This is a "What if?" scenario.
             - Output specific relationship predicate (e.g., 'might_be_related_to', 'could_be_ancestor_of', 'symbolizes').
-            - Output ONLY the prediction in JSON format: {{"predicate": "relationship", "reasoning": "short explanation"}}
+            - Output ONLY the prediction in JSON format: {{"predicate": "relationship", "reasoning": "short explanation"}}{special_instruction}
             """
             
             try:
