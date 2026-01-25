@@ -875,18 +875,19 @@ class NeuronX:
 
             # 1.5 PRE-PROCESSING: Strict Hallucination Filtering
             # Scan for rejections in this batch to prevent the hallucination from being added locally
-            rejected_subjects = set()
+            rejected_pairs = set()
+            correction_predicates = {"is_hallucination", "is_incorrect", "is_wrong", "rejected", "is_not_related_to", "is_distinct_from", "has_distinct_domain_from"}
+            
             for t in batch_triples:
-                if t['predicate'] in ["is_hallucination", "is_incorrect", "is_wrong", "rejected", "is_not_related_to", "is_distinct_from", "has_distinct_domain_from"]:
-                    rejected_subjects.add(t['subject'])
-                    logger.info(f"[bold yellow][NEURON-X][/bold yellow] Detected correction for: {t['subject']}")
+                if t['predicate'] in correction_predicates:
+                    rejected_pairs.add((t['subject'], t['object']))
+                    logger.info(f"[bold yellow][NEURON-X][/bold yellow] Detected correction for: {t['subject']} -> {t['object']}")
 
-            # Filter out triples that are about rejected subjects (unless it's the rejection itself)
-            # This handles the case where AI says "X exists" and User says "No X" in the same block.
+            # Filter out triples that are about rejected valid pairs
             filtered_batch_triples = []
             for t in batch_triples:
-                # If this triple is asserting something about a rejected subject, skip it
-                if t['subject'] in rejected_subjects and t['predicate'] not in ["is_hallucination", "is_incorrect", "is_wrong", "rejected", "is_not_related_to", "is_distinct_from", "has_distinct_domain_from"]:
+                # If this triple is asserting a relationship that was rejected
+                if (t['subject'], t['object']) in rejected_pairs and t['predicate'] not in correction_predicates:
                     logger.info(f"[bold red][NEURON-X][/bold red] Blocked hallucination during consolidation: ({t['subject']}) --[{t['predicate']}]--> ({t['object']})")
                     continue
                 filtered_batch_triples.append(t)
@@ -1009,25 +1010,25 @@ class NeuronX:
                     continue
 
                 # SPECIAL CASE: Negative feedback / Correction
+                # SPECIAL CASE: Negative feedback / Correction
                 # If the predicate suggests something is wrong/incorrect/hallucination
-                if pred.lower() in ["is_hallucination", "is_incorrect", "is_wrong", "rejected"]:
-                    # Lower the weight of ALL edges pointing to this 'subject' if it was a proposal
-                    # Lower the weight of ALL edges pointing to this 'subject'
+                if pred.lower() in ["is_hallucination", "is_incorrect", "is_wrong", "rejected", "is_not_related_to", "is_distinct_from", "has_distinct_domain_from"]:
+                    # Targeted Pruning: Remove only the specific edge derived from the Object
                     # We ignore the category check here because if the user says it's wrong, it's wrong.
                     if subj in self.graph:
                         if subj in PROTECTED_NODES:
                             logger.warning(f"[bold yellow][NEURON-X][/bold yellow] Protected Core Node '{subj}' cannot be rejected.")
                             continue
 
-                        for u, v, data in list(self.graph.in_edges(subj, data=True)):
-                            # Penalize heavily to effectively remove it
-                            self.graph[u][v]['weight'] = 0.0 
-                        for u, v, data in list(self.graph.out_edges(subj, data=True)):
-                            self.graph[u][v]['weight'] = 0.0
-                        
-                        # Mark node itself
-                        self.graph.nodes[subj]["status"] = "REJECTED"
-                        logger.info(f"[bold red][NEURON-X][/bold red] Pruned hallucination: {subj}")
+                        # Targeted removal of the specific relationship
+                        if self.graph.has_edge(subj, obj):
+                             self.graph[subj][obj]['weight'] = 0.0 
+                             logger.info(f"[bold red][NEURON-X][/bold red] Pruned hallucination: ({subj}) -> ({obj})")
+                        else:
+                             logger.debug(f"Attempted to prune ({subj}) -> ({obj}) but edge does not exist.")
+
+                        # Old behavior wiped the whole node. We now only prune the specific edge.
+                        continue
 
                 # Ensure nodes exist & Handle Re-Awakening
                 for node_name in [subj, obj]:
