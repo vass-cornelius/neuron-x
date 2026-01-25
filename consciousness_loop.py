@@ -62,7 +62,7 @@ def run_awareness_loop():
             
             # Simulating processing time / "Metabolism" 
             # Using wait instead of sleep to allow immediate interruption.
-            if stop_event.wait(timeout=60):
+            if stop_event.wait(timeout=30):
                 break
                 
         except Exception as e:

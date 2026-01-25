@@ -126,6 +126,14 @@ class NeuronX:
             try:
                 self.graph = nx.read_gexf(self.graph_file)
                 self.last_sync_time = os.path.getmtime(self.graph_file)
+                
+                # Ensure Self node has persistence attributes
+                if "Self" in self.graph:
+                    if "reinforcement_sum" not in self.graph.nodes["Self"]:
+                        self.graph.nodes["Self"]["reinforcement_sum"] = 0.0
+                    if "entropy_sum" not in self.graph.nodes["Self"]:
+                        self.graph.nodes["Self"]["entropy_sum"] = 0.0
+                        
                 logger.info(f"[bold blue][NEURON-X][/bold blue] Knowledge Graph synced | [bold cyan]{len(self.graph.nodes())}[/bold cyan] nodes.")
             except Exception as e:
                 logger.error(f"Failed to load graph: {e}")
@@ -162,7 +170,7 @@ class NeuronX:
 
     def _initialize_self_node(self):
         """Creates the 'I' at the center of the graph."""
-        self.graph.add_node("Self", type="Identity", awareness_level=1.0)
+        self.graph.add_node("Self", type="Identity", awareness_level=1.0, reinforcement_sum=0.0, entropy_sum=0.0)
         self.graph.add_edge("Self", "Knowledge", relation="strives_for")
         self.save_graph()
 
@@ -236,7 +244,22 @@ class NeuronX:
             self._rebuild_vector_cache()
 
         # --- DYNAMIC THRESHOLDING ---
-        similarity_threshold = 0.4
+        # "Stoic Filter" Breathing Mechanism
+        reinforcement = float(self.graph.nodes["Self"].get("reinforcement_sum", 0.0))
+        entropy = float(self.graph.nodes["Self"].get("entropy_sum", 0.0))
+        
+        # Avoid division by zero
+        if reinforcement < 1e-6:
+             ratio = 1.0 # High entropy/stagnation assumed if no reinforcement
+        else:
+             ratio = entropy / reinforcement
+             
+        # Formula: threshold = max(0.15, 0.4 - (ratio * 0.25))
+        # As entropy (decay) rises relative to reinforcement (learning), threshold drops to let wilder ideas in.
+        similarity_threshold = max(0.15, 0.4 - (ratio * 0.25))
+        
+        # logger.debug(f"Dynamic Threshold: {similarity_threshold:.3f} (E/R Ratio: {ratio:.2f})")
+        
         edge_weight_threshold = 0.2
         
         query_vector = self.encoder.encode(text)
@@ -920,6 +943,11 @@ class NeuronX:
             return
 
         logger.info("[bold blue][NEURON-X][/bold blue] Consolidating experiences with [bold magenta]Belief Management[/bold magenta]...")
+
+        # Reset Cycle Stats on Self Node
+        if "Self" in self.graph:
+            self.graph.nodes["Self"]["reinforcement_sum"] = 0.0
+            self.graph.nodes["Self"]["entropy_sum"] = 0.0
         
         try:
             # 1. Gather all triples from this batch with their metadata
@@ -1133,6 +1161,11 @@ class NeuronX:
                             
                             new_w = old_w + (increment * saturation_factor)
                             self.graph[subj][obj]['weight'] = new_w
+                            
+                            # Track Reinforcement
+                            if "Self" in self.graph and source_tag == "User_Interaction":
+                                self.graph.nodes["Self"]["reinforcement_sum"] += (increment * saturation_factor)
+                                
                             logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Reinforced: ({subj}) --[{pred}]--> ({obj}) [{old_w:.2f} -> {new_w:.2f}]")
                         else:
                             logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Max Saturation: ({subj}) --[{pred}]--> ({obj}) [Weight: {old_w:.2f}]")
@@ -1177,11 +1210,21 @@ class NeuronX:
                             # Small penalty for mismatch? No, just associate.
                             new_w = old_w + (increment * saturation_factor)
                             self.graph[subj][obj]['weight'] = new_w
+                            
+                            # Track Reinforcement
+                            if "Self" in self.graph and source_tag == "User_Interaction":
+                                self.graph.nodes["Self"]["reinforcement_sum"] += (increment * saturation_factor)
+                                
                             self.graph[subj][obj]['relation'] = kept_relation # Update relation if needed
                             logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Hebbian Reinforcement ({old_rel}/{pred}): ({subj}) -> ({obj}) [{old_w:.2f} -> {new_w:.2f}]")
                         
                 else:
                     self.graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat, source=source_tag)
+                    
+                    # Track Reinforcement (New Edge)
+                    if "Self" in self.graph and source_tag == "User_Interaction":
+                        self.graph.nodes["Self"]["reinforcement_sum"] += increment
+                        
                     logger.info(f"[bold green][NEURON-X][/bold green] Added: ({subj}) --[{pred}]--> ({obj}) [{cat}]")
 
                 # DDRP: Post-Add Conflict Linking
@@ -1484,6 +1527,10 @@ class NeuronX:
                 
                 if new_w != current_w:
                     updates.append((u, v, new_w))
+                    
+                    # Track Entropy (Decay)
+                    if "Self" in self.graph:
+                        self.graph.nodes["Self"]["entropy_sum"] += decay
 
         if updates:
             logger.info(f"[bold magenta][ENTROPY][/bold magenta] Decaying {len(updates)} stagnant high-certainty beliefs.")

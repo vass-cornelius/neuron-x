@@ -138,7 +138,15 @@ class GeminiNeuronBridge:
         self.brain.perceive(f"User: {user_text}", source="User_Interaction")
         self.brain.perceive(f"Me: {ai_text}", source="Self_Reflection")
         
-        # Save state
+        # EXPLICIT REINFORCEMENT SIGNAL
+        # Since this interface runs in a separate process/memory space than the consciousness_loop,
+        # we must manually boost the reinforcement score on the persisted graph so the loop "wakes up".
+        if "Self" in self.brain.graph:
+            current_r = self.brain.graph.nodes["Self"].get("reinforcement_sum", 0.0)
+            # Add a significant boost (e.g. +5.0) to jumpstart Study Mode instantly
+            self.brain.graph.nodes["Self"]["reinforcement_sum"] = current_r + 5.0
+            
+        # Save state (Graph + Reinforcement)
         self.brain.save_graph()
         return ai_text
 
