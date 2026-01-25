@@ -33,7 +33,7 @@ def read_codebase_file(filename: str) -> str:
     Useful for understanding the system's own architecture and constraints.
     
     Args:
-        filename: The name of the file to read (e.g., 'neuron_x.py', 'consciousness_loop.py').
+        filename: The name of the file to read (e.g., 'neuron_x.py', 'consciousness_loop.py', 'gemini_interface.py', 'models.py').
                   Must be relative to the project root.
     """
     try:
