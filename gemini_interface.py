@@ -64,7 +64,7 @@ class GeminiNeuronBridge:
             # STEP 1.5: Bridge - Check Subconscious Relevance
             # Check if the "Background Brain" is thinking about something related to the User's text
             subconscious_injection = ""
-            thought_text, thought_vec = self.brain.get_current_thought()
+            thought_text, thought_vec, priority = self.brain.get_current_thought()
             
             if thought_text and thought_vec is not None:
                 # Calculate relevance
@@ -76,18 +76,29 @@ class GeminiNeuronBridge:
                 v_norm = np.linalg.norm(thought_vec) + 1e-9
                 similarity = np.dot(user_vec, thought_vec) / (q_norm * v_norm)
                 
-                if similarity > 0.4: # Low threshold for "somewhat related" context
+                is_relevant = similarity > 0.4
+                is_urgent = priority == "URGENT"
+                
+                if is_relevant or is_urgent: 
                     active_goal = self.brain.get_bg_goal()
                     goal_desc = active_goal.description if active_goal else "Wandering"
                     
+                    prefix = "SUBCONSCIOUS STATE (Visible to AI only):"
+                    if is_urgent:
+                        prefix = "URGENT SUBSCONSCIOUS INTERRUPT:"
+                    
                     subconscious_injection = f"""
-                    SUBCONSCIOUS STATE (Visible to AI only):
+                    {prefix}
                     Your background consciousness is currently focused on: "{goal_desc}".
                     You were just thinking: "{thought_text}"
                     
-                    This is RELEVANT to the user's topic (Relevance: {similarity:.2f}). 
-                    You should subtly acknowledge this intersection of thoughts if appropriate.
+                    Relevance: {similarity:.2f} | Priority: {priority}
                     """
+                    
+                    if is_urgent:
+                        subconscious_injection += "\nThis is a HIGH PRIORITY conflict. You MUST prioritize asking the user about this, even if it changes the subject."
+                    else:
+                        subconscious_injection += "\nThis is RELEVANT to the user's topic. You should subtly acknowledge this intersection of thoughts if appropriate."
 
             # STEP 2: Augment - Inject context into the LLM prompt
             system_context = f"""

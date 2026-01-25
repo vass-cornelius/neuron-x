@@ -446,7 +446,20 @@ class NeuronX:
         context_query = "Self identity goals awareness"
         goal_instruction = ""
         
-        if active_goal:
+        # --- DDRP: Dissonance Check (Priority Interrupt) ---
+        dissonant_nodes = [n for n, data in self.graph.nodes(data=True) if data.get('status') == 'DISSONANT']
+        
+        if dissonant_nodes:
+             focus_subject = random.choice(dissonant_nodes)
+             logger.warning(f"[bold red][DDRP][/bold red] Dissonance Priority: Focusing on '{focus_subject}' to resolve conflict.")
+             goal_instruction = f"""
+             URGENT CONFLICT RESOLUTION:
+             The concept '{focus_subject}' has conflicting definitions in memory (Status: DISSONANT).
+             You MUST ask the user to clarify this specific contradiction.
+             Template: "I recall you mentioned {focus_subject} was [Option A], but recently you said it was [Option B]. Which is correct?"
+             """
+             context_query = focus_subject
+        elif active_goal:
             goal_instruction = f"ACTIVE GOAL: {active_goal.description} (Priority: {active_goal.priority.value})"
             context_query = active_goal.description
             # Try to find a subject in the goal description
@@ -607,26 +620,16 @@ class NeuronX:
                     self.add_goal(goal_data, priority=GoalPriority.MEDIUM)
                     thought_text = thought_content
 
-            return thought_text
+            # Ensure vector is calculated
             thought_vec = self.encoder.encode(thought_text)
-            if self._check_for_loops(thought_text, thought_vec):
-                # Trigger a "Pivotal Thought" by asking for a complete change in perspective
-                logger.info("[bold cyan][NEURON-X][/bold cyan] Triggering perspective shift due to stagnation...")
-                response = self.llm_client.models.generate_content(
-                    model="gemini-2.5-flash", 
-                    contents="You are stuck in a loop. Think about something completely different or look at your identity from a radically new angle.",
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        max_output_tokens=265,
-                    )
-                )
-                thought_text = f"[PIVOT] {response.text.strip()}"
-                thought_vec = self.encoder.encode(thought_text)
 
             # Update thought buffer
             self.thought_buffer.append((thought_text, thought_vec))
             if len(self.thought_buffer) > self.MAX_THOUGHT_RECURSION:
                 self.thought_buffer.pop(0)
+
+            # IPC BROADCAST
+            self._broadcast_thought(thought_text, thought_vec, priority="URGENT" if "URGENT CONFLICT RESOLUTION" in goal_instruction else "NORMAL")
 
             return thought_text
 
@@ -634,11 +637,42 @@ class NeuronX:
             logger.error(f"Failed to generate proactive thought: {e}")
             return "Internal dissonance detected during reflection."
 
+    def _broadcast_thought(self, text, vector, priority="NORMAL"):
+        """Saves the current thought to a JSON stream for external interfaces."""
+        stream_path = os.path.join(self.path, "thought_stream.json")
+        data = {
+            "timestamp": time.time(),
+            "text": text,
+            "vector": vector.tolist() if hasattr(vector, "tolist") else vector,
+            "priority": priority
+        }
+        try:
+            with open(stream_path, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            logger.error(f"Failed to broadcast thought: {e}")
+
     def get_current_thought(self):
-        """Returns the most recent proactive thought and its vector, or None."""
+        """
+        Returns the most recent proactive thought and its vector.
+        checks disk for newer thoughts from background processes.
+        """
+        # Check disk first
+        stream_path = os.path.join(self.path, "thought_stream.json")
+        if os.path.exists(stream_path):
+            try:
+                with open(stream_path, "r") as f:
+                    data = json.load(f)
+                    # Validity check: Is it recent? (e.g. within last 5 mins)
+                    if time.time() - data.get("timestamp", 0) < 300:
+                        vec = np.array(data["vector"])
+                        return data["text"], vec, data.get("priority", "NORMAL")
+            except Exception:
+                pass
+
         if self.thought_buffer:
-            return self.thought_buffer[-1]
-        return None, None
+            return self.thought_buffer[-1][0], self.thought_buffer[-1][1], "NORMAL"
+        return None, None, "NORMAL"
 
     def _extract_triples_batch(self, memories):
         """
@@ -925,6 +959,7 @@ class NeuronX:
                 subj = t.get('subject')
                 pred = t.get('predicate')
                 obj = t.get('object')
+                source_new = t.get('source', 'Unknown')
                 
                 if not all([subj, pred, obj]):
                     continue
@@ -936,10 +971,43 @@ class NeuronX:
                     cat = str(cat)
 
                 # ENFORCE: AI cannot generate raw FACTS, only INFERENCES or PROPOSALS.
-                # Only the USER can establish axioms.
-                if t.get('source') == 'Self_Reflection' and cat == 'FACTUAL':
+                if source_new == 'Self_Reflection' and cat == 'FACTUAL':
                     cat = 'INFERENCE'
                 
+                # --- DDRP: Dissonance Detection ---
+                conflict_detected = False
+                skip_new_edge = False
+                
+                # Check for existing edges with same Subject & Predicate but DIFFERENT Object
+                # Only check if the subject exists and has edges
+                if subj in self.graph:
+                    # Snapshot current edges to check against
+                    existing_edges = list(self.graph.out_edges(subj, data=True))
+                    for u, v, data in existing_edges:
+                        if data.get('relation') == pred and v != obj:
+                            # CONTRADICTION FOUND
+                            source_old = data.get('source', 'Unknown')
+                            
+                            # Case 1: Active Refutation (User overrides AI)
+                            if source_old == 'Self_Reflection' and source_new == 'User_Interaction':
+                                logger.info(f"[bold green][DDRP][/bold green] Overwriting AI Inference ({v}) with User Fact ({obj})")
+                                self.graph.remove_edge(u, v)
+                            
+                            # Case 2: Passive Suppression (AI yields to User)
+                            elif source_old == 'User_Interaction' and source_new == 'Self_Reflection':
+                                logger.info(f"[bold yellow][DDRP][/bold yellow] Suppressing AI Inference ({obj}) due to existing User Fact ({v})")
+                                skip_new_edge = True
+                                break
+                            
+                            # Case 3: Flagging (User vs User)
+                            elif source_old == 'User_Interaction' and source_new == 'User_Interaction':
+                                logger.warning(f"[bold red][DDRP][/bold red] Dissonance Detected: User said '{v}' and now '{obj}' for {subj} {pred}.")
+                                # Mark as Dissonant
+                                conflict_detected = True
+                            
+                if skip_new_edge:
+                    continue
+
                 # SPECIAL CASE: Negative feedback / Correction
                 # If the predicate suggests something is wrong/incorrect/hallucination
                 if pred.lower() in ["is_hallucination", "is_incorrect", "is_wrong", "rejected"]:
@@ -977,7 +1045,8 @@ class NeuronX:
 
                 # Handle edge addition
                 increment = weights.get(cat, 0.5)
-                source_tag = t.get('source', 'Unknown')
+                # Need to use the 'source_new' variable we extracted earlier
+                source_tag = source_new
                 
                 if self.graph.has_edge(subj, obj):
                     # Check if relationship matches
@@ -1043,6 +1112,19 @@ class NeuronX:
                 else:
                     self.graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat, source=source_tag)
                     logger.info(f"[bold green][NEURON-X][/bold green] Added: ({subj}) --[{pred}]--> ({obj}) [{cat}]")
+
+                # DDRP: Post-Add Conflict Linking
+                if conflict_detected:
+                     self.graph.nodes[subj]['status'] = 'DISSONANT'
+                     self.graph.nodes[obj]['status'] = 'DISSONANT'
+                     # Find the other node again to link
+                     for u, v, data in self.graph.out_edges(subj, data=True):
+                         if data.get('relation') == pred and v != obj:
+                             self.graph.nodes[v]['status'] = 'DISSONANT'
+                             # Add bidirectional conflict edges
+                             self.graph.add_edge(obj, v, relation="conflicts_with", weight=5.0)
+                             self.graph.add_edge(v, obj, relation="conflicts_with", weight=5.0)
+                             logger.info(f"[bold red][DDRP][/bold red] Linked conflict: ({obj}) <-> ({v})")
 
             # 4. Save Concept Nodes for context
             # 4. Save Concept Nodes for context
