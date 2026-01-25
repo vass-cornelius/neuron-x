@@ -583,8 +583,6 @@ class NeuronX:
         - If making claims about internal architecture (weights, _dream_cycle, code behavior), you MUST use `read_codebase_file` to verify the code first.
         """
 
-        print(system_instruction)
-
         prompt = f"""
         CURRENT STATE SUMMARY: {summary}
         
@@ -596,8 +594,6 @@ class NeuronX:
 
         Generate a new thought specifically about: {focus_subject}
         """
-
-        print(prompt)
 
         try:
             # --- GOAL COMPLETION PROTOCOL (Text-Based) ---
