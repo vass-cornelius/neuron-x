@@ -235,6 +235,27 @@ class NeuronX:
         if not self.vector_cache:
             self._rebuild_vector_cache()
 
+        # --- DYNAMIC THRESHOLDING ---
+        similarity_threshold = 0.4
+        edge_weight_threshold = 0.2
+        
+        feedback_weight = 0.0
+        has_anchor = False
+        
+        if self.graph.has_edge("Self", "Physical Feedback"):
+            feedback_weight = float(self.graph["Self"]["Physical Feedback"].get("weight", 0.0))
+            has_anchor = True
+        elif self.graph.has_edge("Physical Feedback", "Self"):
+            feedback_weight = float(self.graph["Physical Feedback"]["Self"].get("weight", 0.0))
+            has_anchor = True
+            
+        if has_anchor:
+            # Scale based on weight (max ~5.0)
+            focus_coefficient = min(feedback_weight / 5.0, 1.0)
+            similarity_threshold = 0.2 + (0.4 * focus_coefficient)
+            edge_weight_threshold = 0.2 * focus_coefficient
+            logger.debug(f"[bold cyan][NEURON-X][/bold cyan] Dynamic Focus | ({similarity_threshold:.2f}, {edge_weight_threshold:.2f})")
+
         query_vector = self.encoder.encode(text)
         
         node_names = []
@@ -260,7 +281,7 @@ class NeuronX:
         
         # Get top-k nodes by score
         scored_nodes = sorted(zip(similarities, node_names), key=lambda x: x[0], reverse=True)
-        top_nodes = [node for score, node in scored_nodes[:top_k] if score > 0.4]
+        top_nodes = [node for score, node in scored_nodes[:top_k] if score > similarity_threshold]
         
         extracted_context = []
         seen_triples = set()
@@ -329,7 +350,7 @@ class NeuronX:
                     continue
 
                 # FILTER: Skip very low weight edges (weakly refuted) or explicitly hallucinated ones
-                if float(edge_data.get("weight", 1.0)) < 0.2:
+                if float(edge_data.get("weight", 1.0)) < edge_weight_threshold:
                     continue
                 if neighbor == "hallucinated entity" or neighbor == "incorrect":
                     continue
@@ -359,7 +380,7 @@ class NeuronX:
                     if relation in bad_relations:
                         continue
 
-                    if float(edge_data.get("weight", 1.0)) < 0.2:
+                    if float(edge_data.get("weight", 1.0)) < edge_weight_threshold:
                         continue
                     if pred == "hallucinated entity" or pred == "incorrect":
                         continue
@@ -992,8 +1013,33 @@ class NeuronX:
                             logger.info(f"[bold magenta][NEURON-X][/bold magenta] Promoted Edge: ({subj}) --[{pred}]--> ({obj}) from {old_cat} to {cat}")
 
                     else:
-                        # Different relation between same nodes? Add secondary edge
-                        self.graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat, source=source_tag)
+                        # Different relation between same nodes?
+                        # PROBLEM: In DiGraph, add_edge would OVERWRITE the existing edge (Resetting weight to 1.0)
+                        # FIX: We perform "Hebbian Reinforcement" regardless of the predicate,
+                        # ensuring that "firing together" strengthens the bond.
+                        
+                        old_rel = self.graph[subj][obj].get('relation', 'is_related_to')
+                        old_w = float(self.graph[subj][obj].get('weight', 1.0))
+                        
+                        # 1. Decide which relation to keep
+                        # Heuristic: Keep the "more specific" one.
+                        # If the new one is generic ('is_related_to'), ignore it.
+                        kept_relation = old_rel
+                        if pred not in ["is_related_to", "related_to"] and old_rel in ["is_related_to", "related_to"]:
+                             kept_relation = pred # Upgrade to specific
+                             logger.info(f"[bold magenta][NEURON-X][/bold magenta] Relation Upgraded: ({subj}) --[{pred}]--> ({obj})")
+                        
+                        # 2. Reinforce Weight (Hebbian) - Use the same Asymptotic logic
+                        if old_w < MAX_WEIGHT:
+                            saturation_factor = 1.0 - (old_w / MAX_WEIGHT)
+                            if saturation_factor < 0: saturation_factor = 0
+                            
+                            # Small penalty for mismatch? No, just associate.
+                            new_w = old_w + (increment * saturation_factor)
+                            self.graph[subj][obj]['weight'] = new_w
+                            self.graph[subj][obj]['relation'] = kept_relation # Update relation if needed
+                            logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Hebbian Reinforcement ({old_rel}/{pred}): ({subj}) -> ({obj}) [{old_w:.2f} -> {new_w:.2f}]")
+                        
                 else:
                     self.graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat, source=source_tag)
                     logger.info(f"[bold green][NEURON-X][/bold green] Added: ({subj}) --[{pred}]--> ({obj}) [{cat}]")
