@@ -64,7 +64,7 @@ class GeminiNeuronBridge:
             # STEP 1.5: Bridge - Check Subconscious Relevance
             # Check if the "Background Brain" is thinking about something related to the User's text
             subconscious_injection = ""
-            thought_text, thought_vec, priority = self.brain.get_current_thought()
+            thought_text, thought_vec, priority, context_data = self.brain.get_current_thought()
             
             if thought_text and thought_vec is not None:
                 # Calculate relevance
@@ -97,6 +97,8 @@ class GeminiNeuronBridge:
                     
                     if is_urgent:
                         subconscious_injection += "\nThis is a HIGH PRIORITY conflict. You MUST prioritize asking the user about this, even if it changes the subject."
+                        if context_data:
+                             subconscious_injection += f"\n\nCONFLICT DETAILS (You must address this):\n{context_data}"
                     else:
                         subconscious_injection += "\nThis is RELEVANT to the user's topic. You should subtly acknowledge this intersection of thoughts if appropriate."
 

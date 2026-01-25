@@ -629,7 +629,9 @@ class NeuronX:
                 self.thought_buffer.pop(0)
 
             # IPC BROADCAST
-            self._broadcast_thought(thought_text, thought_vec, priority="URGENT" if "URGENT CONFLICT RESOLUTION" in goal_instruction else "NORMAL")
+            # Pass the goal_instruction as context_data if it's URGENT (Dissonance)
+            context_data = goal_instruction if "URGENT CONFLICT RESOLUTION" in goal_instruction else None
+            self._broadcast_thought(thought_text, thought_vec, priority="URGENT" if "URGENT CONFLICT RESOLUTION" in goal_instruction else "NORMAL", context_data=context_data)
 
             return thought_text
 
@@ -637,14 +639,15 @@ class NeuronX:
             logger.error(f"Failed to generate proactive thought: {e}")
             return "Internal dissonance detected during reflection."
 
-    def _broadcast_thought(self, text, vector, priority="NORMAL"):
+    def _broadcast_thought(self, text, vector, priority="NORMAL", context_data=None):
         """Saves the current thought to a JSON stream for external interfaces."""
         stream_path = os.path.join(self.path, "thought_stream.json")
         data = {
             "timestamp": time.time(),
             "text": text,
             "vector": vector.tolist() if hasattr(vector, "tolist") else vector,
-            "priority": priority
+            "priority": priority,
+            "context_data": context_data
         }
         try:
             with open(stream_path, "w") as f:
@@ -656,6 +659,7 @@ class NeuronX:
         """
         Returns the most recent proactive thought and its vector.
         checks disk for newer thoughts from background processes.
+        Returns: (text, vector, priority, context_data)
         """
         # Check disk first
         stream_path = os.path.join(self.path, "thought_stream.json")
@@ -666,13 +670,13 @@ class NeuronX:
                     # Validity check: Is it recent? (e.g. within last 5 mins)
                     if time.time() - data.get("timestamp", 0) < 300:
                         vec = np.array(data["vector"])
-                        return data["text"], vec, data.get("priority", "NORMAL")
+                        return data["text"], vec, data.get("priority", "NORMAL"), data.get("context_data", None)
             except Exception:
                 pass
 
         if self.thought_buffer:
-            return self.thought_buffer[-1][0], self.thought_buffer[-1][1], "NORMAL"
-        return None, None, "NORMAL"
+            return self.thought_buffer[-1][0], self.thought_buffer[-1][1], "NORMAL", None
+        return None, None, "NORMAL", None
 
     def _extract_triples_batch(self, memories):
         """
