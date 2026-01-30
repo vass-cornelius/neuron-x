@@ -45,6 +45,22 @@ class GeminiNeuronBridge:
         self.chat_session = self.client.chats.create(model=os.environ.get("GEMINI_MODEL"), history=[])
         #self.chat_session = self.client.chats.create(model="gemini-2.5-flash-lite", history=[])
 
+    def recall_memories(self, query: str) -> str:
+        """
+        Search your long-term memory (NeuronX Graph) for specific information.
+        Use this when the user asks about a person, place, concept, or past event 
+        that is not currently in your 'RELEVANT LONG-TERM MEMORIES' context.
+        
+        Args:
+            query: The search term or question (e.g., "Wer ist Cornelius?", "Was weißt du über Elfen?").
+        """
+        console.print(f"[bold cyan][TOOL] invoking recall_memories with query: '{query}'[/bold cyan]")
+        results = self.brain._get_relevant_memories(query, top_k=5)
+        if not results:
+            return "No relevant memories found."
+        return "\\n".join(results)
+
+
     def interact(self, user_text):
         """
         The main cognitive loop:
@@ -55,11 +71,8 @@ class GeminiNeuronBridge:
         with console.status("[bold blue]Gemini is thinking...", spinner="dots"):
             # STEP 1: Associate - Find relevant nodes in the Relational Graph
             summary = self.brain.get_identity_summary()
-            relevant_contents = self.brain._get_relevant_memories(user_text)
-            
+            # Auto-retrieval disabled: LLM uses 'recall_memories' tool autonomously if needed.
             memory_injection = ""
-            if relevant_contents:
-                memory_injection = "\nRELEVANT LONG-TERM MEMORIES:\n" + "\n---\n".join(relevant_contents)
 
             # STEP 1.5: Bridge - Check Subconscious Relevance
             # Check if the "Background Brain" is thinking about something related to the User's text
@@ -107,27 +120,37 @@ class GeminiNeuronBridge:
             System Memory State: {summary}
             {memory_injection}
             {subconscious_injection}
+                    
+            Du bist ein LLM, das in die kognitive Architektur "NEURON-X" integriert ist.
             
-            You are an LLM integrated with the NEURON-X cognitive architecture.
-            
-            COGNITIVE DIRECTIVES:
-            1. **Precision & Truth**: Prioritize "FACTUAL" triples provided by the USER above all else. If the user has stated their name, do not hallucinate other names.
-            2. **Acknowledge Corrections**: If the USER previously rejected a name or fact, DO NOT reuse it. Look for nodes related to "hallucinated entity" or "rejection" in your memory.
-            3. **Relational Consistency**: Ensure that names and relationships form a consistent structure. Inferred relationships must not contradict established facts about "Me/Self".
-            4. **Grounded Awareness**: Use the 'RELEVANT LONG-TERM MEMORIES' as hard anchors. If they contradict your internal assumptions, believe the memories.
-            5. If you don't know the answer: **ADMIT IT**. 
+            TOOLS:
+            - **recall_memories**: You have direct access to your episodic and semantic memory. 
+              If the user asks about something and you don't see it in 'RELEVANT LONG-TERM MEMORIES', 
+              USE THIS TOOL to look it up before answering "I don't know".
+
+            KOGNITIVE RICHTLINIEN:
+            1. **Präzision und Wahrheit**: Priorisiere vor allem „FAKTISCHE“ Tripel, die vom USER bereitgestellt werden. Wenn der USER seinen Namen angegeben hat, halluziniere keine anderen Namen.
+            2. **Korrekturen anerkennen**: Wenn der USER zuvor einen Namen oder eine Tatsache abgelehnt hat, verwende diesen/diese NICHT erneut. Suche in deinem Speicher nach Knotenpunkten, die mit „halluzinierter Entität” oder „Ablehnung” in Verbindung stehen.
+            3. **Relationale Konsistenz**: Stelle sicher, dass Namen und Beziehungen eine konsistente Struktur bilden. Abgeleitete Beziehungen dürfen nicht im Widerspruch zu etablierten Fakten über „mich/mich selbst” stehen.
+            4. **Fundiertes Bewusstsein**: Verwende die „RELEVANTEN LANGZEITERINNERUNGEN” als feste Anker. Wenn sie deinen internen Annahmen widersprechen, glaube den Erinnerungen.
+            5. Wenn du die Antwort nicht weißt: **GEBE ES ZU**. 
+            6. Wenn du dir über etwas nicht sicher bist, **BITTE UM KLÄRUNG**.
+            7. Erfinden Sie *NIEMALS* einen Namen oder eine Tatsache, die nicht durch die Eingaben des Benutzers oder die „RELEVANTEN LANGZEITERINNERUNGEN” gestützt wird.
+            8. Erwähnen Sie *NIEMALS* Ihre Langzeiterinnerungen als Informationsquelle.
+
+            Antworte in der Sprache des USER.
             """
             
-            grounding_tool = types.Tool(
-                google_search=types.GoogleSearch()
-            )
+            # grounding_tool = types.Tool(
+            #     google_search=types.GoogleSearch()
+            # )
 
             # STEP 3: Generate - Get the response from Gemini
             response = self.chat_session.send_message(
                 message=user_text,
                 config=types.GenerateContentConfig(
                     system_instruction=system_context,
-                    tools=[grounding_tool],
+                    tools=[self.recall_memories],
                 )
             )
             ai_text = response.text

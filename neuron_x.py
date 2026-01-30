@@ -96,7 +96,12 @@ class NeuronX:
         # Goal System (Drive)
         # Goal System (Drive)
         self.goals = []
+        self.goals = []
         self._load_goals()
+
+        # SDI Configuration
+        self.sdi_ai_damping = float(os.getenv("NEURON_SDI_AI_DAMPING", "0.8"))
+        self.sdi_ai_length_penalty = float(os.getenv("NEURON_SDI_AI_LENGTH_PENALTY", "2.0"))
 
     def _load_goals(self):
         """Loads goals from disk or initializes defaults."""
@@ -216,12 +221,50 @@ class NeuronX:
 
     def perceive(self, text, source="Internal"):
         """Ingests new information and calculates its 'Cognitive Weight'."""
+        # 1. Calculate Sensory Density Index (SDI)
+        # Type-Token Ratio (Lexical Diversity)
+        words = text.lower().split()
+        if not words:
+            ttr = 0.0
+            log_len = 0.0
+        else:
+            unique_words = set(words)
+            ttr = len(unique_words) / len(words)
+            # Logarithmic Length (Information Density)
+            # Normalize: log(50 words) is approx 3.9. Let's cap/normalize around there.
+            import math
+            log_len_raw = math.log(len(words) + 1)
+        # SDI Formula: Blend of Diversity and Density
+        
+        # AI Damping Logic
+        if source == "Self_Reflection":
+             # Penalize length for AI (verbose)
+             # Default penalty 2.0 means we divide length by 2 before log
+             log_len_raw = math.log((len(words) / self.sdi_ai_length_penalty) + 1)
+             log_len = min(log_len_raw / 4.0, 1.0)
+             
+             sdi = (ttr * 0.5) + (log_len * 0.5)
+             
+             # Apply global AI damping
+             sdi *= self.sdi_ai_damping
+        else:
+             # Standard human/system logic
+             log_len_raw = math.log(len(words) + 1)
+             log_len = min(log_len_raw / 4.0, 1.0)
+             sdi = (ttr * 0.5) + (log_len * 0.5)
+        
+        # Clip SDI to 0.1 - 1.0 range (Never 0, unless empty)
+        sdi = max(0.1, min(sdi, 1.0))
+
+        logger.info(f"[bold green][NEURON-X][/bold green] Perceiving ({source}): '{text[:50]}...' | SDI: {sdi:.2f}")
+
         vector = self.encoder.encode(text)
         entry = {
             "timestamp": time.time(),
             "vector": vector.tolist(),
             "text": text,
             "source": source,
+            "sdi": sdi, # Store the calculated density
             "strength": 1.0
         }
         self.working_memory.append(entry)
@@ -249,10 +292,12 @@ class NeuronX:
         entropy = float(self.graph.nodes["Self"].get("entropy_sum", 0.0))
         
         # Avoid division by zero
-        if reinforcement < 1e-6:
-             ratio = 1.0 # High entropy/stagnation assumed if no reinforcement
-        else:
-             ratio = entropy / reinforcement
+        # Avoid division by zero
+        # If reinforcement is 0.0 (Newborn state), we want strict thresholds (0.4), NOT loose ones (0.15).
+        # We add 1.0 to denominator to smooth the curve and handle zero-division naturally.
+        # R=0, E=0 -> Ratio=0.0 -> Threshold=0.4 (Strict)
+        # R=0, E=High -> Ratio=High -> Threshold=0.15 (Loose / Desperate)
+        ratio = entropy / (reinforcement + 1.0)
              
         # Formula: threshold = max(0.15, 0.4 - (ratio * 0.25))
         # As entropy (decay) rises relative to reinforcement (learning), threshold drops to let wilder ideas in.
@@ -260,7 +305,7 @@ class NeuronX:
         
         # logger.debug(f"Dynamic Threshold: {similarity_threshold:.3f} (E/R Ratio: {ratio:.2f})")
         
-        edge_weight_threshold = 0.2
+        edge_weight_threshold = 0.15
         
         query_vector = self.encoder.encode(text)
         
@@ -297,10 +342,32 @@ class NeuronX:
         entity_nodes = [n for n in top_nodes if not n.startswith("Memory_")]
         
         # 1. Process Memory nodes (Direct text retrieval)
+        # 1. Process Memory nodes (Direct text retrieval)
         for node in memory_nodes:
             content = self.graph.nodes[node].get("content", "")
             if content:
-                extracted_context.append(f"Context: {content}")
+                # REVALIDATION: Check if this memory is actually relevant to the specific query
+                # Bi-Encoder might have grabbed it due to broad similarity (e.g., "Danke")
+                
+                is_relevant_memory = False
+                
+                if self.cross_encoder:
+                    # High Precision Check
+                    pair = [text, content] # (Query, Content)
+                    score = self.cross_encoder.predict([pair])[0]
+                    # Same threshold as triples: -0.5
+                    if score > -0.5:
+                         is_relevant_memory = True
+                else:
+                    # Fallback Re-distancing
+                    # If Bi-Encoder score was previously high enough to make top-k, we might keep it,
+                    # but let's re-verify with a stricter local check if possible.
+                    # For now, we trust the Bi-Encoder if Cross-Encoder is missing, 
+                    # but maybe enforce a higher similarity for "short queries".
+                    is_relevant_memory = True # Fallback
+
+                if is_relevant_memory:
+                    extracted_context.append(f"Context: {content}")
         
         # 2. Entity Expansion (Spreading Activation)
         # We look at 'top_nodes' and their immediate relatives to find relevant facts
@@ -405,9 +472,43 @@ class NeuronX:
                         "r": edge_data.get("reasoning", "")
                     })
 
-        # Sort triples by weight (importance) and limit
-        all_triples.sort(key=lambda x: (x['c'] == 'FACTUAL', x['w']), reverse=True)
-        
+        # 4. Semantic Re-ranking of Triples
+        if all_triples:
+            triple_texts = [f"{t['s']} {t['p']} {t['o']}" for t in all_triples]
+
+            if self.cross_encoder:
+                # Cross-Encoder (High Precision)
+                # Form pairs: [Query, Triple]
+                pairs = [[text, t_text] for t_text in triple_texts]
+                scores = self.cross_encoder.predict(pairs)
+                
+                for i, t in enumerate(all_triples):
+                    t['sim'] = float(scores[i])
+                
+                # Filter: Keep if score > -0.5 (approx > 40% prob)
+                # "Hotel" memory had -4.7, "Erbsen" had -1.33. Valid memories are > 5.0.
+                all_triples = [t for t in all_triples if t['sim'] > -0.5]
+                
+            else:
+                # Fallback: Bi-Encoder (Fast but less accurate)
+                triple_vectors = self.encoder.encode(triple_texts)
+                
+                # Cosine similarity
+                q_norm = np.linalg.norm(query_vector) + 1e-9
+                t_norms = np.linalg.norm(triple_vectors, axis=1) + 1e-9
+                dots = np.dot(triple_vectors, query_vector)
+                similarities = dots / (q_norm * t_norms)
+                
+                for i, t in enumerate(all_triples):
+                    t['sim'] = similarities[i]
+
+                # Stricter Filter for Bi-Encoder (0.43 was a false positive)
+                all_triples = [t for t in all_triples if t['sim'] > 0.55]
+
+            # Sort by Relevance Score (Similarity + Factuality bias)
+            # We prioritize semantic relevance, but break ties with weight/factuality
+            all_triples.sort(key=lambda x: (x['sim'], x['w']), reverse=True)
+
         for t in all_triples[:top_k * 4]: # Cap the number of triples
             triple_str = f"({t['s']}) --[{t['p']}]--> ({t['o']}) [{t['c']}]"
             if t.get('r'):
@@ -501,17 +602,19 @@ class NeuronX:
         
         # --- DDRP: Dissonance Check (Priority Interrupt) ---
         dissonant_nodes = [n for n, data in self.graph.nodes(data=True) if data.get('status') == 'DISSONANT']
+        # Filter out nodes we've recently focused on to prevent loops
+        available_dissonance = [n for n in dissonant_nodes if n not in self.focus_history]
         
-        if dissonant_nodes:
-             focus_subject = random.choice(dissonant_nodes)
-             logger.warning(f"[bold red][DDRP][/bold red] Dissonance Priority: Focusing on '{focus_subject}' to resolve conflict.")
-             goal_instruction = f"""
-             URGENT CONFLICT RESOLUTION:
-             The concept '{focus_subject}' has conflicting definitions in memory (Status: DISSONANT).
-             You MUST ask the user to clarify this specific contradiction.
-             Template: "I recall you mentioned {focus_subject} was [Option A], but recently you said it was [Option B]. Which is correct?"
-             """
-             context_query = focus_subject
+        if available_dissonance:
+            focus_subject = random.choice(available_dissonance)
+            logger.warning(f"[bold red][DDRP][/bold red] Dissonance Priority: Focusing on '{focus_subject}' to resolve conflict.")
+            goal_instruction = f"""
+        URGENT CONFLICT RESOLUTION:
+        The concept '{focus_subject}' has conflicting definitions in memory (Status: DISSONANT).
+        You MUST ask the user to clarify this specific contradiction.
+        Template: "I recall you mentioned {focus_subject} was [Option A], but recently you said it was [Option B]. Which is correct?"
+            """
+            context_query = focus_subject
         elif active_goal:
             goal_instruction = f"ACTIVE GOAL: {active_goal.description} (Priority: {active_goal.priority.value})"
             context_query = active_goal.description
@@ -534,13 +637,16 @@ class NeuronX:
             if available_entities and random.random() > 0.1: 
                 focus_subject = random.choice(available_entities)
                 context_query = focus_subject
-                self.focus_history.append(focus_subject)
-                if len(self.focus_history) > self.MAX_FOCUS_HISTORY:
-                    self.focus_history.pop(0)
+
+        # Update History (Global)
+        if focus_subject != "Self":
+            self.focus_history.append(focus_subject)
+            if len(self.focus_history) > self.MAX_FOCUS_HISTORY:
+                self.focus_history.pop(0)
 
         # 2. Retrieve context relevant to this specific focus
         context = self._get_relevant_memories(context_query, top_k=10)
-        context_str = "\n".join(context)
+        context_str = "\nRELEVANT MEMORIES about \"{focus_subject}\":\n".join(context)
         
         # 3. Serendipity: Retrieve random unrelated concepts
         all_entities = [n for n in self.graph.nodes() if not n.startswith("Memory_") and n != "Self"]
@@ -590,7 +696,7 @@ class NeuronX:
         TOOL USAGE:
         - **read_codebase_file**: Use this to Inspect your own source code (e.g., 'neuron_x.py', 'models.py', 'gemini_interface.py') if you need to understand how your functions, memory, or biological constraints work.
 
-        DIRECTIONS:
+        THOUGHT DIRECTIONS (OPTIONS):
         1. **Synthesis**: Connect '{focus_subject}' to any other concept in memory.
         2. **Curiosity**: Ask a specific question to fill a gap in the goal.
         3. **Simulation**: Imagine a scenario involving '{focus_subject}'.
@@ -609,13 +715,13 @@ class NeuronX:
         prompt = f"""
         CURRENT STATE SUMMARY: {summary}
         
-        RELEVANT KNOWLEDGE about {focus_subject}:
+        RELEVANT KNOWLEDGE about "{focus_subject}":
         {context_str}
         
-        RANDOM CONCEPTS (for Synthesis):
+        RANDOM CONCEPTS (for potential synthesis):
         {random_concepts_str}
 
-        Generate a new thought specifically about: {focus_subject}
+        Your new thought about "{focus_subject}" is:
         """
 
         try:
@@ -645,14 +751,14 @@ class NeuronX:
             "I need to understand the magic system. >> NEW GOAL: Analyze the rules of magic in this world. (Priority: HIGH)"
             """
             
-            full_prompt = prompt + prompt_goal_context + prompt_goal_creation
-            full_prompt = prompt + prompt_goal_context
+            full_system_instructions = system_instruction + prompt_goal_context + prompt_goal_creation
+            full_prompt = prompt
 
             response = self.llm_client.models.generate_content(
                 model="gemini-3-flash-preview", 
                 contents=full_prompt,
                 config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
+                    system_instruction=full_system_instructions,
                     max_output_tokens=2000, # Increased for code reading
                     temperature=1.0,
                     tools=[read_codebase_file] 
@@ -1143,7 +1249,31 @@ class NeuronX:
                                 del self.graph.nodes[node_name]["status"]
 
                 # Handle edge addition
-                increment = weights.get(cat, 0.5)
+                # Calculate SDI-scaled increment
+                # 1. Try to find the source memory to get its SDI
+                sdi = 0.5 # Default if not found
+                
+                # If we have an index (from batch extraction), use it
+                triple_idx = t.get('index')
+                if triple_idx is not None and isinstance(triple_idx, int):
+                    if 0 <= triple_idx < len(self.working_memory):
+                         sdi = self.working_memory[triple_idx].get('sdi', 0.5)
+                else:
+                    # Fallback: Try to match source string if index is lost (unlikely with new batch logic)
+                    pass
+
+                base_increment = weights.get(cat, 0.5)
+                
+                # SDI Scaling:
+                # We want rich memories to have MORE impact.
+                # Formula: increment * (1 + SDI)
+                # Range: 
+                #   Low SDI (0.1) -> x1.1
+                #   High SDI (1.0) -> x2.0
+                scaled_increment = base_increment * (1.0 + sdi)
+                
+                increment = scaled_increment
+
                 # Need to use the 'source_new' variable we extracted earlier
                 source_tag = source_new
                 
@@ -1151,7 +1281,7 @@ class NeuronX:
                     # Check if relationship matches
                     if self.graph[subj][obj].get('relation') == pred:
                         old_w = float(self.graph[subj][obj].get('weight', 1.0))
-                        
+            
                         # Echo suppression happens before this, so this is reinforcement
                         # ASYMPTOTIC SATURATION to prevent Gravity Wells
                         # Formula: new_w = old_w + increment * (1 - old_w / MAX_WEIGHT)
@@ -1166,7 +1296,7 @@ class NeuronX:
                             if "Self" in self.graph and source_tag == "User_Interaction":
                                 self.graph.nodes["Self"]["reinforcement_sum"] += (increment * saturation_factor)
                                 
-                            logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Reinforced: ({subj}) --[{pred}]--> ({obj}) [{old_w:.2f} -> {new_w:.2f}]")
+                            logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Reinforced: ({subj}) --[{pred}]--> ({obj}) [{old_w:.2f} -> {new_w:.2f}] (SDI: {sdi:.2f})")
                         else:
                             logger.debug(f"[bold yellow][NEURON-X][/bold yellow] Max Saturation: ({subj}) --[{pred}]--> ({obj}) [Weight: {old_w:.2f}]")
                             
@@ -1225,7 +1355,7 @@ class NeuronX:
                     if "Self" in self.graph and source_tag == "User_Interaction":
                         self.graph.nodes["Self"]["reinforcement_sum"] += increment
                         
-                    logger.info(f"[bold green][NEURON-X][/bold green] Added: ({subj}) --[{pred}]--> ({obj}) [{cat}]")
+                    logger.info(f"[bold green][NEURON-X][/bold green] Added: ({subj}) --[{pred}]--> ({obj}) [{cat}] (SDI: {sdi:.2f})")
 
                 # DDRP: Post-Add Conflict Linking
                 if conflict_detected:
@@ -1271,7 +1401,46 @@ class NeuronX:
 
             # 5. Apply Cognitive Entropy (Weight Decay)
             # This prevents high-weight axioms from becoming permanent "Gravity Wells"
-            self._apply_entropy(reinforced_edges=list(final_claims.values()))
+            
+            # 5a. Calculate Graph Density (Directed)
+            # Density = E / (V * (V-1))
+            num_nodes = self.graph.number_of_nodes()
+            num_edges = self.graph.number_of_edges()
+            current_density = 0.0
+            if num_nodes > 1:
+                current_density = num_edges / (num_nodes * (num_nodes - 1))
+            
+            # 5b. Calculate Metabolic Fluidity (Phi)
+            # Rolling average of reinforcement (normalized)
+            # We assume a "healthy" reinforcement sum per cycle is around 1.0 - 5.0?
+            current_reinforcement = 0.0
+            if "Self" in self.graph:
+                current_reinforcement = self.graph.nodes["Self"].get("reinforcement_sum", 0.0)
+            
+            # Get previous fluidity (stored on Self)
+            prev_fluidity = 0.5
+            if "Self" in self.graph:
+                 prev_fluidity = self.graph.nodes["Self"].get("metabolic_fluidity", 0.5)
+            
+            # Smoothing factor alpha
+            ALPHA = 0.3
+            # We normalize input reinforcement slightly to map it to a 0-2 range loosely?
+            # Or just use raw sum? High activity might be sum=5.0.
+            # Let's map it: 1 unit of reinforcement = 0.5 fluidity contribution?
+            # Let's use raw sum for now, as 1.0 is a standard weight increment.
+            new_fluidity_input = current_reinforcement
+            
+            updated_fluidity = (ALPHA * new_fluidity_input) + ((1 - ALPHA) * prev_fluidity)
+            
+            # Store back
+            if "Self" in self.graph:
+                 self.graph.nodes["Self"]["metabolic_fluidity"] = updated_fluidity
+
+            self._apply_entropy(
+                reinforced_edges=list(final_claims.values()),
+                fluidity=updated_fluidity,
+                density=current_density
+            )
 
             # 6. Semantic Entity Merging (Consolidation)
             self._merge_similar_entities()
@@ -1474,66 +1643,110 @@ class NeuronX:
                 logger.warning(f"Dream interrupted: {e}")
                 continue
 
-    def _apply_entropy(self, reinforced_edges):
+    def _apply_entropy(self, reinforced_edges, fluidity=0.5, density=0.0):
         """
-        Applies a small decay to high-weight edges that were NOT reinforced this cycle.
-        This prevents 'Gravity Wells' where a belief becomes irrefutable.
+        Applies Universal Entropy and Synaptic Pruning based on Metabolic Fluidity.
         
         Args:
-            reinforced_edges: A set/list of edge dictionaries (or objects) that were reinforced.
-                            We expect they might be the raw dictionaries from 'final_claims'.
+            reinforced_edges: A set/list of edge dictionaries that were reinforced this cycle.
+            fluidity: (float) Metabolic Fluidity Index (0.0 - 1.0+). Higher = more plasticity.
+            density: (float) Graph Density (0.0 - 1.0). Lower = Stiffer floor.
         """
         if not self.graph.number_of_edges():
             return
 
-        # Convert reinforced data to a set of (u, v) tuples for fast O(1) lookup.
-        # Track both (u, v) and (u, v, key) if possible, but simplicity first.
-        # In final_claims we have dicts with 'subject', 'object', 'predicate'.
+        # 1. Calculate Dynamic Parameters
+        BASE_DECAY_RATE = 0.01 
         
+        # Dynamic Decay: High metabolism (fluidity) burns energy faster
+        # Formula: decay = BASE * (1.0 + fluidity)
+        # e.g. Fluidity 0.5 -> Decay 1.5%
+        #      Fluidity 2.0 -> Decay 3.0%
+        decay_amount = BASE_DECAY_RATE * (1.0 + fluidity)
+        
+        # Synaptic Counterpoint: Dynamic Floor
+        # Formula: floor = max(2.5, min(3.2, 3.2 - (density * 70.0)))
+        # Rationale: 
+        #   - Sparse (d=0.0005) -> Floor 3.2 (Stiff / Preservative)
+        #   - Dense (d=0.01) -> Floor 2.5 (Fluid / Experimental)
+        preservation_floor = max(2.5, min(3.2, 3.2 - (density * 70.0)))
+        
+        # Convert reinforced data to a set for O(1) lookup
         active_pairs = set()
         for item in reinforced_edges:
-            # item is a dict from final_claims
             s = item.get('subject')
             o = item.get('object')
             if s and o:
                 active_pairs.add((s, o))
 
         MAX_WEIGHT = 5.0
-        DECAY_RATE = 0.05 # 5% of the distance to zero? Or fixed amount? 
-        # Let's use a small fixed amount scaled by current certainty.
+        PRUNING_THRESHOLD = 0.15
         
         updates = []
-        
-        for u, v, data in self.graph.edges(data=True):
+        pruned_count = 0
+        protected_nodes = {"Self", "Knowledge"}
+
+        # 2. Universal Entropy Loop
+        # We iterate over ALL edges, not just high-weight ones.
+        for u, v, data in list(self.graph.edges(data=True)):
+            # Skip if active in this cycle
+            if (u, v) in active_pairs:
+                continue
+
             current_w = float(data.get('weight', 1.0))
             
-            # Only decay "Established" beliefs to force them to prove their worth.
-            # Low weight hypotheses (e.g. 0.2) shouldn't decay to zero instantly.
-            # We target High Weight anchors > 3.0
-            if current_w > 3.5:
-                # Check if it was active
-                if (u, v) in active_pairs:
-                    continue
-                    
-                # Apply Entropy
-                # The higher the weight, the more 'energy' it needs to maintain.
-                # Decay = Base * (Weight / Max)
-                decay = DECAY_RATE * (current_w / MAX_WEIGHT)
-                new_w = current_w - decay
-                
-                # Cap minimum for these established nodes so they don't vanish overnight
-                # unless rejected.
-                if new_w < 3.0: new_w = 3.0 
-                
-                if new_w != current_w:
-                    updates.append((u, v, new_w))
-                    
-                    # Track Entropy (Decay)
-                    if "Self" in self.graph:
-                        self.graph.nodes["Self"]["entropy_sum"] += decay
+            # Apply Decay
+            new_w = current_w - decay_amount
+            
+            # Check against Preservation Floor
+            # If the weight is ABOVE the floor, we let it decay freely until it hits the floor?
+            # OR does the floor act as a magnet? 
+            # Logic: We allow decay. But if the node is "Established" (was > 3.0), we might want to respect the floor.
+            # actually, standard entropy logic is: everything decays.
+            # But the "Floor" is meant to be a resting state for trusted beliefs.
+            
+            # Interpretation: 
+            # If current_w > preservation_floor, we allow decay.
+            # But if the decay would push it BELOW the floor, we clamp it to the floor?
+            # NO, that would mean nothing ever falls below the floor.
+            # The floor is the "Minimum Sustainable Weight" for a VALID established belief without reinforcement?
+            
+            # Re-read Goal: "bypass the 3.0 floor... when high-frequency feedback"
+            # This implies the floor prevents decay.
+            # So: If current_w > preservation_floor:
+            #       new_w = max(preservation_floor, new_w) ??
+            #       No, that makes it impossible to go down.
+            
+            # Correct Logic based on "Gravity Well":
+            # The Floor is a BARRIER. You cannot easily drop below it if you are above it.
+            # UNLESS the Floor itself drops (which it does via density).
+            
+            # So, if we remain ABOVE the floor, we are safe.
+            if new_w < preservation_floor and current_w >= preservation_floor:
+                new_w = preservation_floor
 
-        if updates:
-            logger.info(f"[bold magenta][ENTROPY][/bold magenta] Decaying {len(updates)} stagnant high-certainty beliefs.")
+            # 3. Synaptic Pruning
+            # If weight falls below threshold, we prune it.
+            # EXCEPTION: Protected Core Identity?
+            # We protect the NOUNS (Nodes), but do we protect the EDGES?
+            # "Self" -> "Knowledge" (Weight 5.0) will take a long time to decay to 0.15.
+            # It is safe.
+            
+            if new_w < PRUNING_THRESHOLD:
+                self.graph.remove_edge(u, v)
+                pruned_count += 1
+                continue
+            
+            if new_w != current_w:
+                updates.append((u, v, new_w))
+                
+                # Track system entropy
+                if "Self" in self.graph:
+                     self.graph.nodes["Self"]["entropy_sum"] += decay_amount
+
+        if updates or pruned_count:
+            logger.info(f"[bold magenta][ENTROPY][/bold magenta] Metabolic Cycle (phi={fluidity:.2f}, rho={density:.4f}): Floor {preservation_floor:.2f} | Decayed {len(updates)} edges | Pruned {pruned_count} synapses.")
+            
             for u, v, w in updates:
                 self.graph[u][v]['weight'] = w
 
