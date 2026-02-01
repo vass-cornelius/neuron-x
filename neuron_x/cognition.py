@@ -18,8 +18,8 @@ from neuron_x.const import (
 from neuron_x.storage import GraphSmith
 from neuron_x.memory import VectorVault
 from models import ExtractionResponse, Goal
-from prompts import get_tought_system_instruction
-from llm_tools import read_codebase_file
+from neuron_x.prompts import get_tought_system_instruction
+from neuron_x.llm_tools import read_codebase_file
 
 logger = logging.getLogger("neuron-x")
 
@@ -28,11 +28,12 @@ class CognitiveCore:
     The 'CPU' of NeuronX. Handles the consciousness loop:
     Perception -> Working Memory -> Consolidation -> Graph Update -> Proactive Thought.
     """
-    def __init__(self, persistence: GraphSmith, memory: VectorVault, llm_client=None):
+    def __init__(self, persistence: GraphSmith, memory: VectorVault, llm_client=None, plugin_tools_getter=None):
         logger.info("[bold blue][COGNITIVE_CORE][/bold blue] Initializing Logic Gate...")
         self.smith = persistence
         self.vault = memory
         self.llm_client = llm_client
+        self.plugin_tools_getter = plugin_tools_getter  # Callable that returns dict of plugin tools
         
         # Working Memory (RAM-based short-term)
         self.working_memory: List[Dict[str, Any]] = []
@@ -765,6 +766,19 @@ class CognitiveCore:
             
             full_system_instructions = system_instruction + prompt_goal_context + prompt_goal_creation
             full_prompt = prompt
+            
+            # Collect all available tools
+            all_tools = [read_codebase_file]
+            
+            # Add plugin tools if available
+            if self.plugin_tools_getter:
+                try:
+                    plugin_tools = self.plugin_tools_getter()
+                    if plugin_tools:
+                        all_tools.extend(plugin_tools.values())
+                        logger.debug(f"[CONSCIOUS_LOOP] {len(plugin_tools)} plugin tool(s) available for autonomous use")
+                except Exception as e:
+                    logger.warning(f"[CONSCIOUS_LOOP] Failed to get plugin tools: {e}")
 
             response = self.llm_client.models.generate_content(
                 model="gemini-3-flash-preview", 
@@ -773,7 +787,7 @@ class CognitiveCore:
                     system_instruction=full_system_instructions,
                     max_output_tokens=2000,
                     temperature=1.0,
-                    tools=[read_codebase_file] 
+                    tools=all_tools
                 )
             )
             

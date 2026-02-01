@@ -21,7 +21,8 @@ class NeuronX:
         # Initialize Components
         self.smith = GraphSmith(self.path)
         self.vault = VectorVault()
-        self.core = CognitiveCore(self.smith, self.vault, llm_client)
+        # Note: plugin_tools_getter is None here - NeuronBridge will create its own CognitiveCore with plugins
+        self.core = CognitiveCore(self.smith, self.vault, llm_client, plugin_tools_getter=None)
         
         # Public properties for compatibility
         self.llm_client = llm_client

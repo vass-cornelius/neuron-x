@@ -102,8 +102,87 @@ The system will display: *"[BRIDGE] Triggering Sleep Cycle for consolidation..."
 
 ## 🛠 Project Structure
 
-- `neuron_x.py`: The core cognitive engine and graph management.
-- `gemini_interface.py`: The interactive chat UI with memory injection.
-- `install.py`: Automated environment setup.
-- `chat.command`: Easy-launch script for macOS users.
-- `memory_vault/`: Directory where the persistent brain state is saved.
+- `neuron_x/`: The modular cognitive architecture package
+  - `core.py`: NeuronX facade for backward compatibility
+  - `cognition.py`: Cognitive processing and thought generation
+  - `storage.py`: Graph persistence (GraphSmith)
+  - `memory.py`: Vector embeddings (VectorVault)
+  - `bridge.py`: Controller for NeuronX interface
+  - `plugin_manager.py`: Dynamic plugin loading and management
+  - `plugins/`: Extensible plugin directory
+- `gemini_interface.py`: Interactive chat UI with memory injection
+- `install.py`: Automated environment setup
+- `chat.command`: Easy-launch script for macOS users
+- `memory_vault/`: Directory where the persistent brain state is saved
+
+## 🔌 Plugin System
+
+NEURON-X now supports a plugin system that allows you to extend the bot's capabilities with custom tools.
+
+### Using Plugins
+
+Plugins are automatically discovered and loaded when the bot starts. They provide additional tools that the AI can use during conversations.
+
+**Example conversation using the HTTP fetcher plugin:**
+
+```
+> Can you fetch the contents of https://example.com and tell me what you see?
+
+[AI uses fetch_url_content tool]
+
+I retrieved the content from example.com. It's a simple demonstration webpage 
+that serves as an example domain for illustrative purposes...
+```
+
+### Available Plugins
+
+- **http_fetcher**: Fetch files and content from HTTP/HTTPS URLs
+  - `fetch_file(url, destination, timeout)` - Download files or retrieve content
+  - `fetch_url_content(url, timeout)` - Quickly get web page content
+
+### Creating Custom Plugins
+
+Create a new file or directory in `neuron_x/plugins/`:
+
+```python
+from neuron_x.plugin_base import BasePlugin, PluginMetadata
+from collections.abc import Mapping
+from typing import Callable, Any
+
+class MyPlugin(BasePlugin):
+    @property
+    def metadata(self) -> PluginMetadata:
+        return PluginMetadata(
+            name="my_plugin",
+            version="1.0.0",
+            description="Description of what your plugin does",
+            dependencies=["requests>=2.28.0"]  # Optional
+        )
+    
+    def get_tools(self) -> Mapping[str, Callable[..., Any]]:
+        return {
+            "my_tool": self.my_tool_impl
+        }
+    
+    def my_tool_impl(self, param: str) -> str:
+        """Tool description for the LLM."""
+        return f"Result: {param}"
+```
+
+See `neuron_x/plugins/README.md` for detailed plugin development guidelines.
+
+### Managing Plugins
+
+```python
+from neuron_x.bridge import NeuronBridge
+
+bridge = NeuronBridge()
+
+# List plugins
+plugins = bridge.list_plugins()
+
+# Load/unload plugins
+bridge.load_plugin("my_plugin")
+bridge.unload_plugin("my_plugin")
+```
+

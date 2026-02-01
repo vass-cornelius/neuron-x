@@ -3,12 +3,18 @@ import threading
 import time
 import logging
 import datetime
+from pathlib import Path
 from typing import Optional, Callable
 from google import genai
 from google.genai import types
 
 from neuron_x import NeuronX
 from neuron_x.prompts import get_system_instruction
+from neuron_x.plugin_manager import PluginManager
+from neuron_x.storage import GraphSmith
+from neuron_x.memory import VectorVault
+from neuron_x.cognition import CognitiveCore
+from neuron_x.const import DEFAULT_PERSISTENCE_PATH
 
 # Setup a dedicated logger for the thought stream
 thought_logger = logging.getLogger("neuron-x.thoughts")
@@ -25,7 +31,28 @@ class NeuronBridge:
             raise KeyError("GEMINI_API_KEY not found in environment variables.")
         
         self.client = genai.Client(api_key=api_key)
+        
+        # Initialize Plugin System first
+        plugin_dir = Path(__file__).parent / "plugins"
+        self.plugin_manager = PluginManager(plugin_dir)
+        self._initialize_plugins()
+        
+        # Initialize cognitive components directly (not via NeuronX facade)
+        # This allows us to pass plugin tools to the cognitive core
+        persistence_path = Path(DEFAULT_PERSISTENCE_PATH)
+        self.smith = GraphSmith(persistence_path)
+        self.vault = VectorVault()
+        self.core = CognitiveCore(
+            self.smith, 
+            self.vault, 
+            self.client,
+            plugin_tools_getter=self.plugin_manager.get_all_tools
+        )
+        
+        # Create NeuronX facade for backward compatibility (used in interact())
+        # Note: This creates duplicate components but maintains compatibility
         self.brain = NeuronX(llm_client=self.client)
+        
         self.chat_session = self.client.chats.create(model=os.environ.get("GEMINI_MODEL"), history=[])
         
         # Background Loop State
@@ -55,8 +82,9 @@ class NeuronBridge:
                 if self.stop_event.wait(timeout=60):
                     break
                 
-                thought = self.brain.generate_proactive_thought()
-                self.brain.perceive(f"Self-Reflection: {thought}", source="Self_Reflection")
+                # Use core directly (has plugin tools), not brain facade
+                thought = self.core.generate_proactive_thought()
+                self.core.perceive(f"Self-Reflection: {thought}", source="Self_Reflection")
                 
                 # Log to file instead of console
                 thought_logger.info(f"[SUBCONSCIOUS] {thought}")
@@ -98,12 +126,17 @@ class NeuronBridge:
             """Search long-term memory."""
             res = self.brain._get_relevant_memories(query)
             return "\n".join(res) if res else "No memories found."
+        
+        # Collect all tools (built-in + plugins)
+        all_tools = [recall_memories_tool]
+        plugin_tools = self.plugin_manager.get_all_tools()
+        all_tools.extend(plugin_tools.values())
 
         response = self.chat_session.send_message(
             message=user_text,
             config=types.GenerateContentConfig(
                 system_instruction=system_instr,
-                tools=[recall_memories_tool]
+                tools=all_tools
             )
         )
         ai_text = response.text
@@ -118,3 +151,33 @@ class NeuronBridge:
             
         self.brain.save_graph()
         return ai_text
+    
+    # Plugin Management Methods
+    
+    def _initialize_plugins(self) -> None:
+        """Discover and auto-load available plugins."""
+        logger = logging.getLogger("neuron-x")
+        try:
+            available = self.plugin_manager.discover_plugins()
+            logger.info(f"Discovered {len(available)} plugin(s)")
+            
+            # Auto-load all available plugins
+            for plugin_name in available:
+                try:
+                    self.plugin_manager.load_plugin(plugin_name)
+                except Exception as e:
+                    logger.warning(f"Failed to load plugin '{plugin_name}': {e}")
+        except Exception as e:
+            logger.error(f"Plugin initialization failed: {e}")
+    
+    def load_plugin(self, name: str) -> None:
+        """Load a plugin by name."""
+        self.plugin_manager.load_plugin(name)
+    
+    def unload_plugin(self, name: str) -> None:
+        """Unload a plugin by name."""
+        self.plugin_manager.unload_plugin(name)
+    
+    def list_plugins(self) -> dict:
+        """List all available plugins and their status."""
+        return self.plugin_manager.list_plugins()
