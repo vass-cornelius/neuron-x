@@ -8,11 +8,7 @@ class TripleCategory(str, Enum):
     PROPOSAL = "PROPOSAL"
     HYPOTHESIS = "HYPOTHESIS"
 
-class GoalPriority(str, Enum):
-    CRITICAL = "CRITICAL"
-    HIGH = "HIGH"
-    MEDIUM = "MEDIUM"
-    LOW = "LOW"
+from neuron_x.const import GoalPriority
 
 class Goal(BaseModel):
     id: str = Field(default_factory=lambda: __import__("uuid").uuid4().hex, description="Unique identifier for the goal.")

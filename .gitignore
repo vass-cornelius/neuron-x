@@ -1,7 +1,12 @@
 *.gexf
 *.json
 .agent
-__pycache__
+
 .env
+*.log
 nohup.out
+
+__pycache__
 .venv
+
+memory_vault
