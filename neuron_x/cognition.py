@@ -353,7 +353,7 @@ class CognitiveCore:
         sim_threshold = max(0.15, 0.4 - ratio * 0.25)
         edge_weight_threshold = 0.15
         query_vector = self.vault.encode(text)
-        candidates = self.vault.get_similar_nodes(query_vector, top_k=top_k * 2, threshold=sim_threshold, graph=graph)
+        candidates = self.vault.get_similar_nodes(query_vector, top_k=top_k * 2, threshold=sim_threshold, graph=graph, query_text=text)
         top_nodes = [node for score, node in candidates][:top_k]
         extracted_context = []
         memory_nodes = [n for n in top_nodes if n.startswith('Memory_')]
