@@ -107,10 +107,11 @@ The system will display: *"[BRIDGE] Triggering Sleep Cycle for consolidation..."
   - `cognition.py`: Cognitive processing and thought generation
   - `storage.py`: Graph persistence (GraphSmith)
   - `memory.py`: Vector embeddings (VectorVault)
-  - `bridge.py`: Controller for NeuronX interface
+  - `bridge.py`: Controller for NeuronX interface / Audio transcription logic
   - `plugin_manager.py`: Dynamic plugin loading and management
   - `plugins/`: Extensible plugin directory
-- `gemini_interface.py`: Interactive chat UI with memory injection
+  - `optimizer/`: Self-optimization engine with Draft-Test-Commit workflow
+- `gemini_interface.py`: Interactive chat UI
 - `install.py`: Automated environment setup
 - `chat.command`: Easy-launch script for macOS users
 - `memory_vault/`: Directory where the persistent brain state is saved
@@ -185,4 +186,42 @@ plugins = bridge.list_plugins()
 bridge.load_plugin("my_plugin")
 bridge.unload_plugin("my_plugin")
 ```
+
+---
+
+## 🧠 Self-Optimization
+
+NEURON-X features an advanced **Self-Optimization System** that allows the AI to analyze its own code, propose improvements, and safely apply them.
+
+### Draft-Test-Commit Workflow
+To ensure system stability, the optimizer follows a rigorous safety protocol:
+1.  **Analysis**: Identifies performance bottlenecks or redundant logic.
+2.  **Draft**: Creates a temporary version of the modified code.
+3.  **Validation**: Runs tests and syntax checks on the draft.
+4.  **Commit**: Safely overwrites the original file only if all tests pass.
+5.  **Backup**: Automatically creates a restorable backup before any change.
+
+### Tools for the AI
+The system exposes several tools to the LLM via the `optimizer` plugin:
+- `list_optimization_opportunities`: Scans the codebase for potential fixes.
+- `optimize_module`: Executes the full optimization workflow.
+- `rollback_optimization`: Restores a previous version from a Backup ID.
+- `get_optimization_history`: Shows previous success/failure logs.
+
+---
+
+## 🛠 Agentic Skills
+
+The system uses **Agentic Skills** to handle complex task workflows. These are stored in `.agent/skills/` and provide specialized knowledge and tool usage patterns:
+
+- **`memory-retrieval`**: Optimizes how the AI searches long-term memory.
+- **`self-optimization`**: Guides the AI through the Draft-Test-Commit cycle.
+- **`senior-architect`**: Provides patterns for modular system design and structural refactoring.
+- **`python-developer`**: Enforces Python best practices and modern async patterns.
+
+---
+
+## 🎙 Audio Transcription
+
+NEURON-X supports direct audio interaction. In the chat interface, if the system detects an audio file path or receives an audio stream via supported plugins, it uses Gemini's multi-modal capabilities to transcribe the speech and integrate it into its perception.
 

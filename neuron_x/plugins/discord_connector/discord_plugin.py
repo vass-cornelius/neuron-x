@@ -2,16 +2,14 @@ import os
 import threading
 import logging
 import asyncio
-import sys
-from typing import Mapping, Callable, Any, Optional
+from typing import Mapping, Callable, Any, Optional, List
 from neuron_x.plugin_base import BasePlugin, PluginMetadata
 
 logger = logging.getLogger("neuron-x.plugins.discord")
 
 class DiscordConnectorPlugin(BasePlugin):
     """
-    Plugin to connect NeuronX to Discord.
-    Requires the 'discord.py' package.
+    Plugin to connect NeuronX to Discord with auto-splitting for long messages.
     """
     
     def __init__(self):
@@ -25,8 +23,8 @@ class DiscordConnectorPlugin(BasePlugin):
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="discord_connector",
-            version="1.3.1",
-            description="Discord integration with context-aware messaging and remote restart",
+            version="1.6.0",
+            description="Discord integration with message splitting (2000 char limit) and central restart support",
             author="NeuronX",
             capabilities=["messaging", "discord", "files", "control"],
             dependencies=["discord.py"]
@@ -34,89 +32,91 @@ class DiscordConnectorPlugin(BasePlugin):
 
     def get_tools(self) -> Mapping[str, Callable[..., Any]]:
         return {
-            "send_discord_message": self.send_message_tool,
-            "restart_neuron_x": self.restart_tool
+            "send_discord_message": self.send_message_tool
         }
 
-    def restart_tool(self) -> str:
-        """
-        Triggers a graceful restart of the entire NeuronX system.
-        Use this when plugins have been updated and need to be reloaded.
-        """
-        logger.info("Remote restart triggered via Tool.")
-        
-        if self.context and hasattr(self.context, 'restart') and self.context.restart:
-            # Use the bridge's restart function which handles cleanup
-            def delayed_restart():
-                import time
-                time.sleep(2)
-                self.context.restart()
+    def _split_text(self, text: str, limit: int = 1900) -> List[str]:
+        """Splits text into chunks to respect Discord's character limit."""
+        if not text:
+            return []
+        chunks = []
+        while len(text) > limit:
+            split_at = text.rfind('\n', 0, limit)
+            if split_at == -1:
+                split_at = limit
+            chunks.append(text[:split_at].strip())
+            text = text[split_at:].strip()
+        if text:
+            chunks.append(text)
+        return chunks
 
-            threading.Thread(target=delayed_restart, daemon=True).start()
-            return "Restart initiated (graceful). I will be back online in a few seconds."
-        else:
-            # Fallback to old method if context is missing
-            def delayed_restart_fallback():
-                import time
-                time.sleep(2)
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+    async def _safe_send(self, target: Any, text: str, file_path: Optional[str] = None):
+        """Helper to send text chunks and optional files safely."""
+        import discord
+        try:
+            chunks = self._split_text(text)
+            
+            if file_path and os.path.exists(file_path):
+                with open(file_path, 'rb') as f:
+                    discord_file = discord.File(f)
+                    await target.send(chunks[0] if chunks else "", file=discord_file)
+                    for chunk in chunks[1:]:
+                        if chunk: await target.send(chunk)
+            else:
+                if not chunks: # Still send something if text is empty but no file
+                    return
+                for chunk in chunks:
+                    if chunk: await target.send(chunk)
+        except Exception as e:
+            logger.error(f"Discord send error: {e}")
 
-            threading.Thread(target=delayed_restart_fallback, daemon=True).start()
-            return "Restart initiated (forceful). I will be back online in a few seconds."
+    def restart_tool(self, reason: Optional[str] = None, todos: Optional[str] = None) -> str:
+        logger.info(f"Local restart triggered. Reason: {reason}")
+        resume_state = {
+            "plugin": "discord_connector",
+            "channel_id": self.last_channel_id,
+            "reason": reason,
+            "todos": todos
+        }
+        if self.context and self.context.restart:
+            self.context.restart(resume_state)
+            return "Restarting..."
+        return "Error: Restart function not available."
 
     def send_message_tool(self, channel_id: Any, text: str, file_path: Optional[str] = None) -> str:
-        """
-        Sends a message (and optionally a file) to a Discord channel.
-        To send to the current conversation, pass 0 as the channel_id.
-        """
         try:
             cid = int(channel_id)
         except (ValueError, TypeError):
             cid = 0
             
         target_id = cid if cid != 0 else self.last_channel_id
-        
         if not target_id:
-            return "Error: No channel ID provided and no active conversation found."
-            
+            return "Error: No channel ID found."
         if not self.client or not self.loop:
             return "Error: Discord client not running."
 
-        future = asyncio.run_coroutine_threadsafe(
-            self._send_async(target_id, text, file_path), self.loop
-        )
-        try:
-            future.result(timeout=15)
-            return f"Message sent to channel {target_id}."
-        except Exception as e:
-            return f"Failed to send Discord message: {str(e)}"
+        asyncio.run_coroutine_threadsafe(self._send_to_channel(target_id, text, file_path), self.loop)
+        return f"Message queued for channel {target_id}."
 
-    async def _send_async(self, channel_id: int, text: str, file_path: Optional[str] = None):
+    async def _send_to_channel(self, channel_id: int, text: str, file_path: Optional[str] = None):
         import discord
         channel = self.client.get_channel(channel_id)
         if not channel:
-            channel = await self.client.fetch_channel(channel_id)
-        
+            try:
+                channel = await self.client.fetch_channel(channel_id)
+            except:
+                logger.error(f"Channel {channel_id} not found.")
+                return
         if channel:
-            if file_path and os.path.exists(file_path):
-                with open(file_path, 'rb') as f:
-                    discord_file = discord.File(f)
-                    await channel.send(text, file=discord_file)
-            else:
-                await channel.send(text)
-        else:
-            raise ValueError(f"Channel {channel_id} not found.")
+            await self._safe_send(channel, text, file_path)
 
     def _run_bot(self, token: str):
-        """Internal method to run the bot in a thread."""
         import discord
-        
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         
         intents = discord.Intents.default()
         intents.message_content = True 
-        
         self.client = discord.Client(intents=intents)
 
         @self.client.event
@@ -131,17 +131,20 @@ class DiscordConnectorPlugin(BasePlugin):
             self.last_channel_id = message.channel.id
             
             if message.content.strip().lower() == "!restart":
-                await message.channel.send("Initialisiere manuellen Neustart...")
-                self.restart_tool()
+                await message.channel.send("Neustart wird eingeleitet...")
+                self.restart_tool(reason="User command !restart")
                 return
 
-            if self.context and hasattr(self.context, 'interact'):
-                logger.info(f"Discord message from {message.author} in {message.channel}: {message.content}")
+            if self.context and self.context.interact:
+                context_metadata = {
+                    "plugin": "discord_connector",
+                    "channel_id": message.channel.id
+                }
                 async with message.channel.typing():
-                    response_text = self.context.interact(message.content)
+                    response_text = self.context.interact(message.content, context_metadata=context_metadata)
                 
                 if response_text:
-                    await message.channel.send(response_text)
+                    await self._safe_send(message.channel, response_text)
 
         try:
             self.loop.run_until_complete(self.client.start(token))
@@ -149,11 +152,9 @@ class DiscordConnectorPlugin(BasePlugin):
             logger.error(f"Discord bot error: {e}")
         finally:
             try:
-                # Cleanup connection before closing loop
                 if self.client and not self.client.is_closed():
                     self.loop.run_until_complete(self.client.close())
-            except:
-                pass
+            except: pass
             self.loop.close()
 
     def on_load(self) -> None:
@@ -161,13 +162,9 @@ class DiscordConnectorPlugin(BasePlugin):
         if token:
             self.thread = threading.Thread(target=self._run_bot, args=(token,), daemon=True)
             self.thread.start()
-            logger.info("Discord connector thread started.")
-        else:
-            logger.warning("DISCORD_TOKEN not set.")
 
     def on_unload(self) -> None:
         if self.client and self.loop:
-            # We try to close it gracefully
             asyncio.run_coroutine_threadsafe(self.client.close(), self.loop)
 
     def is_available(self) -> bool:

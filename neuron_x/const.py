@@ -21,6 +21,7 @@ else:
 DEFAULT_GRAPH_FILENAME = "synaptic_graph.gexf"
 DEFAULT_GOALS_FILENAME = "goals.json"
 DEFAULT_THOUGHT_STREAM_FILENAME = "thought_stream.json"
+DEFAULT_RESUME_FILENAME = "resume_state.json"
 
 # Goal Weights
 GOAL_WEIGHTS = {

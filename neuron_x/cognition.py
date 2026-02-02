@@ -41,6 +41,7 @@ class CognitiveCore:
         self.lock = threading.RLock()
         self.goals: List[Goal] = []
         self._load_goals()
+        # Initialize the internal graph reference
         self.graph = self.smith.load_graph()
         self.vault.rebuild_cache(self.graph)
 
@@ -126,42 +127,51 @@ class CognitiveCore:
         Performs extraction, echo suppression, graph updates, entropy decay, 
         and entity merging.
         """
-        with self.lock:
-            graph = self.smith.load_graph()
         if not self.working_memory:
             return
-        logger.info('[bold blue][NEURON-X][/bold blue] Consolidating experiences...')
-        if 'Self' in graph:
-            graph.nodes['Self']['reinforcement_sum'] = 0.0
-            graph.nodes['Self']['entropy_sum'] = 0.0
-        try:
-            batch_triples = self._extract_triples_logic(self.working_memory)
-            rejected_pairs = set()
-            correction_predicates = {'is_hallucination', 'is_incorrect', 'is_wrong', 'rejected', 'is_not_related_to', 'is_distinct_from', 'has_distinct_domain_from'}
-            for t in batch_triples:
-                if t['predicate'] in correction_predicates:
-                    rejected_pairs.add((t['subject'], t['object']))
-            filtered = [t for t in batch_triples if (t['subject'], t['object']) not in rejected_pairs or t['predicate'] in correction_predicates]
-            batch_triples = filtered
-            processed_triples = self._echo_suppression(batch_triples)
-            self._write_triples_to_graph(graph, processed_triples)
-            self._save_concept_nodes(graph, self.working_memory)
-            num_nodes = graph.number_of_nodes()
-            num_edges = graph.number_of_edges()
-            current_density = num_edges / (num_nodes * (num_nodes - 1)) if num_nodes > 1 else 0.0
-            current_reinforcement = graph.nodes['Self'].get('reinforcement_sum', 0.0) if 'Self' in graph else 0.0
-            prev_fluidity = graph.nodes['Self'].get('metabolic_fluidity', 0.5) if 'Self' in graph else 0.5
-            updated_fluidity = 0.3 * current_reinforcement + 0.7 * prev_fluidity
+            
+        with self.lock:
+            # Sync with disk only if modified externally
+            updated_graph = self.smith.sync_if_needed(self.graph)
+            if updated_graph:
+                self.graph = updated_graph
+            graph = self.graph
+            
+            logger.info('[bold blue][NEURON-X][/bold blue] Consolidating experiences...')
             if 'Self' in graph:
-                graph.nodes['Self']['metabolic_fluidity'] = updated_fluidity
-            self._apply_entropy(graph, list(processed_triples.values()), updated_fluidity, current_density)
-            self._merge_similar_entities(graph)
-            self._dream_cycle(graph)
-        except Exception as e:
-            logger.exception(f'[bold red][ERROR][/bold red] Consolidation failed: {e}')
-        self.working_memory = []
-        self.smith.save_graph(graph)
-        self.vault.rebuild_cache(graph)
+                graph.nodes['Self']['reinforcement_sum'] = 0.0
+                graph.nodes['Self']['entropy_sum'] = 0.0
+            try:
+                batch_triples = self._extract_triples_logic(self.working_memory)
+                rejected_pairs = set()
+                correction_predicates = {'is_hallucination', 'is_incorrect', 'is_wrong', 'rejected', 'is_not_related_to', 'is_distinct_from', 'has_distinct_domain_from'}
+                for t in batch_triples:
+                    if t['predicate'] in correction_predicates:
+                        rejected_pairs.add((t['subject'], t['object']))
+                filtered = [t for t in batch_triples if (t['subject'], t['object']) not in rejected_pairs or t['predicate'] in correction_predicates]
+                batch_triples = filtered
+                processed_triples = self._echo_suppression(batch_triples)
+                self._write_triples_to_graph(graph, processed_triples)
+                self._save_concept_nodes(graph, self.working_memory)
+                num_nodes = graph.number_of_nodes()
+                num_edges = graph.number_of_edges()
+                current_density = num_edges / (num_nodes * (num_nodes - 1)) if num_nodes > 1 else 0.0
+                current_reinforcement = graph.nodes['Self'].get('reinforcement_sum', 0.0) if 'Self' in graph else 0.0
+                prev_fluidity = graph.nodes['Self'].get('metabolic_fluidity', 0.5) if 'Self' in graph else 0.5
+                updated_fluidity = 0.3 * current_reinforcement + 0.7 * prev_fluidity
+                if 'Self' in graph:
+                    graph.nodes['Self']['metabolic_fluidity'] = updated_fluidity
+                self._apply_entropy(graph, list(processed_triples.values()), updated_fluidity, current_density)
+                self._merge_similar_entities(graph)
+                self._dream_cycle(graph)
+                
+                # Save the updated graph back to disk
+                self.smith.save_graph(graph)
+                self.vault.rebuild_cache(graph)
+                
+            except Exception as e:
+                logger.exception(f'[bold red][ERROR][/bold red] Consolidation failed: {e}')
+            self.working_memory = []
 
     def _extract_triples_logic(self, memories: List[Dict]) -> List[Dict]:
         """Routing for triple extraction (Batch LLM or Regex Fallback)."""
@@ -341,7 +351,14 @@ class CognitiveCore:
 
     def _get_relevant_memories(self, text: str, top_k: int=5) -> List[str]:
         """Retrieves semantically relevant nodes and their relational context."""
-        graph = self.smith.load_graph()
+        with self.lock:
+            # Sync with disk only if modified externally
+            updated_graph = self.smith.sync_if_needed(self.graph)
+            if updated_graph:
+                self.graph = updated_graph
+                self.vault.rebuild_cache(self.graph)
+            graph = self.graph
+            
         if not self.vault.vector_cache:
             self.vault.rebuild_cache(graph)
         if len(graph.nodes()) <= 1:
@@ -459,8 +476,15 @@ class CognitiveCore:
         """
         if not self.llm_client:
             return 'Awaiting cognitive expansion.'
-        graph = self.smith.load_graph()
-        self.vault.rebuild_cache(graph)
+            
+        with self.lock:
+            # Sync with disk only if modified externally
+            updated_graph = self.smith.sync_if_needed(self.graph)
+            if updated_graph:
+                self.graph = updated_graph
+                self.vault.rebuild_cache(self.graph)
+            graph = self.graph
+            
         active_goal = self.get_bg_goal()
         focus_subject, goal_instruction, context_query = ('Self', '', 'Self identity goals awareness')
         dissonant = [n for n, d in graph.nodes(data=True) if d.get('status') == 'DISSONANT']

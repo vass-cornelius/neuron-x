@@ -35,10 +35,20 @@ class PluginContext:
     def __init__(
         self, 
         interact_func: Optional[Callable[[str], str]] = None,
-        restart_func: Optional[Callable[[], None]] = None
+        restart_func: Optional[Callable[[Optional[dict]], None]] = None,
+        transcribe_func: Optional[Callable[[str], str]] = None,
+        get_tool_func: Optional[Callable[[str], Optional[Callable]]] = None
     ):
         self.interact = interact_func
         self.restart = restart_func
+        self.transcribe = transcribe_func
+        self._get_tool_func = get_tool_func
+
+    def get_tool(self, name: str) -> Optional[Callable]:
+        """Retrieves a specific tool by name from the environment."""
+        if self._get_tool_func:
+            return self._get_tool_func(name)
+        return None
 
 
 class BasePlugin(ABC):

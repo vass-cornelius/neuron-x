@@ -1,13 +1,10 @@
 from pathlib import Path
 from typing import Optional, Any
 import logging
-
 from neuron_x.storage import GraphSmith
 from neuron_x.memory import VectorVault
 from neuron_x.cognition import CognitiveCore
-
-logger = logging.getLogger("neuron-x")
-
+logger = logging.getLogger('neuron-x')
 from neuron_x.const import DEFAULT_PERSISTENCE_PATH
 
 class NeuronX:
@@ -15,26 +12,24 @@ class NeuronX:
     Facade for the NeuronX Cognitive Architecture.
     Maintains backward compatibility while delegating to modular components.
     """
-    def __init__(self, persistence_path: str = DEFAULT_PERSISTENCE_PATH, llm_client: Any = None):
+
+    def __init__(self, persistence_path: str=DEFAULT_PERSISTENCE_PATH, llm_client: Any=None, core: Optional[CognitiveCore]=None, smith: Optional[GraphSmith]=None, vault: Optional[VectorVault]=None):
+        """
+        Facade for the NeuronX Cognitive Architecture.
+        Allows injection of existing components to prevent redundant initialization.
+        """
         self.path = Path(persistence_path)
-        
-        # Initialize Components
-        self.smith = GraphSmith(self.path)
-        self.vault = VectorVault()
-        # Note: plugin_tools_getter is None here - NeuronBridge will create its own CognitiveCore with plugins
-        self.core = CognitiveCore(self.smith, self.vault, llm_client, plugin_tools_getter=None)
-        
-        # Public properties for compatibility
         self.llm_client = llm_client
+        self.smith = smith if smith else GraphSmith(self.path)
+        self.vault = vault if vault else VectorVault()
+        if core:
+            self.core = core
+        else:
+            self.core = CognitiveCore(self.smith, self.vault, llm_client, plugin_tools_getter=None)
 
     @property
     def graph(self):
         """Exposes the underlying networkx graph."""
-        # This is a bit expensive if we load it every time, but necessary for direct access compatibility.
-        # Ideally, we should cache it or expose the one from storage if loaded.
-        # But GraphSmith loads it on demand. 
-        # Let's delegate to a cached property or method if possible, 
-        # but for now simple loading is safe.
         return self.smith.load_graph()
 
     @property
@@ -49,13 +44,13 @@ class NeuronX:
 
     @property
     def working_memory(self):
-         return self.core.working_memory
+        return self.core.working_memory
 
     @property
     def thought_buffer(self):
-         return self.core.thought_buffer
+        return self.core.thought_buffer
 
-    def perceive(self, text: str, source: str = "Internal") -> None:
+    def perceive(self, text: str, source: str='Internal') -> None:
         self.core.perceive(text, source)
 
     def consolidate(self) -> None:
@@ -81,15 +76,8 @@ class NeuronX:
 
     def save_graph(self):
         """Explicit save trigger."""
-        # Logic layer handles saving usually, but if called explicitly:
         self.smith.save_graph(self.smith.load_graph())
 
-    # Forward other private methods if tests access them?
-    # e.g. _get_relevant_memories
-    # If external scripts call privates, they are breaking encapsulation, but we can shim them.
     def _get_relevant_memories(self, text, top_k=5):
-        # We didn't implement this publicly in Core yet.
-        # Ideally CognitiveCore handles this.
-        # For now, let's stub it or move logic to Memory/Cognition.
-        # The `check_state.py` might use it? No, check_state usually checks graph.
-        return [] # Placeholder
+        """Delegates memory retrieval to the CognitiveCore."""
+        return self.core._get_relevant_memories(text, top_k=top_k)
