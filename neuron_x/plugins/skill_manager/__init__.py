@@ -14,11 +14,14 @@ import json
 import re
 from pathlib import Path
 from typing import Dict, Any, Optional
+from collections.abc import Mapping
+
+from neuron_x.plugin_base import BasePlugin, PluginMetadata
 
 logger = logging.getLogger("neuron-x.plugins.skill-manager")
 
 
-class SkillManagerPlugin:
+class SkillManagerPlugin(BasePlugin):
     """
     Plugin for managing skills in .agent/skills/.
     
@@ -27,22 +30,31 @@ class SkillManagerPlugin:
     
     def __init__(self) -> None:
         """Initialize the skill manager plugin."""
+        super().__init__()
         self._project_root: Optional[Path] = None
         self._skills_dir: Optional[Path] = None
     
-    def activate(self, project_root: Path) -> None:
-        """
-        Activate the plugin.
-        
-        Args:
-            project_root: Root directory of the project
-        """
-        self._project_root = project_root
-        self._skills_dir = project_root / ".agent" / "skills"
-        self._skills_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("[SKILL_MANAGER] Plugin activated")
+    @property
+    def metadata(self) -> PluginMetadata:
+        """Return plugin metadata."""
+        return PluginMetadata(
+            name="skill_manager",
+            version="1.0.0",
+            description="Manage autonomous skills in .agent/skills/",
+            author="NeuronX Team",
+            capabilities=["skills", "automation", "discovery"],
+        )
     
-    def get_tools(self) -> Dict[str, Any]:
+    def on_load(self) -> None:
+        """Initialize the plugin on load."""
+        super().on_load()
+        # In the context of NeuronX, the project root is usually the current directory
+        self._project_root = Path.cwd()
+        self._skills_dir = self._project_root / ".agent" / "skills"
+        self._skills_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"[SKILL_MANAGER] Plugin initialized at {self._skills_dir}")
+
+    def get_tools(self) -> Mapping[str, Any]:
         """
         Return available tools for this plugin.
         
@@ -114,17 +126,9 @@ class SkillManagerPlugin:
             
         Returns:
             Success message with skill path
-            
-        Example:
-            create_skill(
-                skill_name="database-expert",
-                description="Expert guidance for database design",
-                instructions="# Database Expert\\n\\nUse when...\\n",
-                examples="## Example\\n```sql\\nSELECT...```"
-            )
         """
         if not self._skills_dir:
-            return "Error: Plugin not activated"
+            return "Error: Plugin not initialized"
         
         # Sanitize skill name
         safe_name = self._sanitize_skill_name(skill_name)
@@ -196,7 +200,7 @@ description: {description}
             Formatted list of skills with names and descriptions
         """
         if not self._skills_dir:
-            return "Error: Plugin not activated"
+            return "Error: Plugin not initialized"
         
         if not self._skills_dir.exists():
             return "No skills directory found"
@@ -254,41 +258,11 @@ description: {description}
     def search_skills_online(self, query: str) -> str:
         """
         Search the web for existing skills.
-        
-        This is a placeholder that would integrate with web search.
-        
-        Args:
-            query: Natural language search query
-            
-        Returns:
-            List of potential skill sources (URLs)
         """
-        # TODO: Integrate with HTTP fetcher to search for skills
-        return f"Searching for skills matching '{query}'...\n\n" \
-               "This feature would search for:\n" \
-               "- GitHub repositories with SKILL.md files\n" \
-               "- Documentation sites with skill patterns\n" \
-               "- Community skill repositories\n\n" \
-               "TODO: Implement web search integration"
+        return f"Searching for skills matching '{query}'... (Feature not fully implemented)"
     
     def install_skill_from_url(self, url: str, skill_name: str) -> str:
         """
         Download and install a skill from a URL.
-        
-        This is a placeholder that would integrate with HTTP fetcher.
-        
-        Args:
-            url: URL to SKILL.md or repository
-            skill_name: Name to save the skill as
-            
-        Returns:
-            Success message with installed skill info
         """
-        # TODO: Integrate with HTTP fetcher to download skills
-        return f"Installing skill '{skill_name}' from {url}...\n\n" \
-               "This feature would:\n" \
-               "1. Download content from URL\n" \
-               "2. Validate SKILL.md format\n" \
-               "3. Create skill directory structure\n" \
-               "4. Download additional files if needed\n\n" \
-               "TODO: Implement URL download integration"
+        return f"Installing skill '{skill_name}' from {url}... (Feature not fully implemented)"

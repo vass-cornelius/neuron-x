@@ -41,7 +41,7 @@ class SafetyConfig:
         "# DO NOT OPTIMIZE",
     ])
     
-    max_execution_time: int = 30  # seconds
+    max_execution_time: int = 120  # seconds (increased from 30)
     backup_retention_days: int = 30
     require_tests: bool = True
     cache_expiry_hours: int = 48  # How long to cache attempted optimizations

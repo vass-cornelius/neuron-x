@@ -31,7 +31,7 @@ class HttpFetcherPlugin(BasePlugin):
         """Return plugin metadata."""
         return PluginMetadata(
             name="http_fetcher",
-            version="1.0.0",
+            version="1.0.1",
             description="Fetch files and content from online sources via HTTP/HTTPS",
             author="NeuronX Team",
             dependencies=["requests>=2.28.0"],
@@ -66,7 +66,7 @@ class HttpFetcherPlugin(BasePlugin):
         self,
         url: str,
         destination: str | None = None,
-        timeout: int = 30,
+        timeout: int = 60,
     ) -> str:
         """
         Fetch a file from a URL and optionally save it to disk.
@@ -79,7 +79,7 @@ class HttpFetcherPlugin(BasePlugin):
             url: The URL to fetch (must be http:// or https://)
             destination: Optional local path to save the file. If not provided,
                         content is returned as a string.
-            timeout: Request timeout in seconds (default: 30)
+            timeout: Request timeout in seconds (default: 60)
         
         Returns:
             Success message with file location or file content
@@ -89,7 +89,7 @@ class HttpFetcherPlugin(BasePlugin):
             - fetch_file("https://example.com/image.png", "/tmp/image.png") → Saves file
         """
         try:
-            logger.info(f"Fetching URL: {url}")
+            logger.info(f"Fetching URL: {url} (timeout={timeout}s)")
             
             # Validate URL scheme
             if not url.startswith(("http://", "https://")):
@@ -157,7 +157,7 @@ class HttpFetcherPlugin(BasePlugin):
             logger.error(f"{error_msg}: {e}")
             return f"Error: {error_msg} - {str(e)}"
     
-    def fetch_url_content(self, url: str, timeout: int = 30) -> str:
+    def fetch_url_content(self, url: str, timeout: int = 60) -> str:
         """
         Fetch and return the text content of a URL (HTTP/HTTPS only).
         
@@ -170,7 +170,7 @@ class HttpFetcherPlugin(BasePlugin):
         
         Args:
             url: The URL to fetch (must be http:// or https://)
-            timeout: Request timeout in seconds (default: 30)
+            timeout: Request timeout in seconds (default: 60)
         
         Returns:
             The text content from the URL or an error message

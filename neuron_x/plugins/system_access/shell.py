@@ -13,12 +13,13 @@ DANGEROUS_COMMANDS = [
     "chown",
 ]
 
-def run_command(command: str) -> str:
+def run_command(command: str, timeout: int = 120) -> str:
     """
     Execute a shell command and return its output.
     
     Args:
         command: The shell command to execute.
+        timeout: Safety timeout in seconds (default: 120)
         
     Returns:
         The combined stdout and stderr of the command.
@@ -30,13 +31,13 @@ def run_command(command: str) -> str:
             return f"Error: Command '{command}' is blocked for safety reasons."
             
     try:
-        logger.info(f"Executing command: {command}")
+        logger.info(f"Executing command: {command} (timeout={timeout}s)")
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             text=True,
-            timeout=30 # Safety timeout
+            timeout=timeout
         )
         
         output = result.stdout
@@ -48,6 +49,6 @@ def run_command(command: str) -> str:
             
         return output
     except subprocess.TimeoutExpired:
-        return "Error: Command timed out after 30 seconds."
+        return f"Error: Command timed out after {timeout} seconds."
     except Exception as e:
         return f"Error executing command: {e}"
