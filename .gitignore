@@ -8,5 +8,6 @@ nohup.out
 
 __pycache__
 .venv
+tmp
 
 memory_vault

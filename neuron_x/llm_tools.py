@@ -1,3 +1,11 @@
+import os
+import logging
+from pathlib import Path
+
+logger = logging.getLogger("neuron-x")
+
+
+
 def read_codebase_file(filename: str) -> str:
     """
     Reads the content of a file from the current neuron-x codebase directory.
@@ -7,20 +15,32 @@ def read_codebase_file(filename: str) -> str:
         filename: The name of the file to read (e.g., 'neuron_x.py', 'consciousness_loop.py', 'gemini_interface.py', 'models.py').
                   Must be relative to the project root.
     """
+    if not filename:
+        return "Error: No filename provided"
+    
+    # Security: prevent path traversal
+    if ".." in filename or filename.startswith("/"):
+        return f"Error: Invalid filename '{filename}'. Use relative paths from project root."
+    
+    # Get project root
+    project_root = Path.cwd()
+    file_path = project_root / filename
+    
+    # Check if it's a skill file
+    if ".agent/skills/" in str(filename):
+        logger.info(f"[SKILLS] LLM is reading skill file: {filename}")
+    
+    # Security: ensure file is within project
     try:
-        # Security: Restrict to current directory
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        target_path = os.path.abspath(os.path.join(base_dir, filename))
-        
-        if not target_path.startswith(base_dir):
-            return f"Access denied: {filename} is outside the codebase directory."
-            
-        if not os.path.exists(target_path):
-            return f"File not found: {filename}"
-            
-        with open(target_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-            return f"--- FILE: {filename} ---\n{content}\n--- END OF FILE ---"
-            
+        file_path.resolve().relative_to(project_root.resolve())
+    except ValueError:
+        return f"Error: File '{filename}' is outside project root"
+    
+    if not file_path.exists():
+        return f"Error: File '{filename}' not found"
+    
+    try:
+        content = file_path.read_text(encoding="utf-8")
+        return content
     except Exception as e:
-        return f"Error reading file: {str(e)}"
+        return f"Error reading '{filename}': {e}"

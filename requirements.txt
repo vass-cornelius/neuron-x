@@ -7,3 +7,5 @@ scikit-learn
 rich
 torch
 prompt-toolkit
+astor
+pytest

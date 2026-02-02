@@ -123,9 +123,22 @@ class NeuronBridge:
         # Better: Define the tool function here or in Brain.
         
         def recall_memories_tool(query: str):
-            """Search long-term memory."""
+            """
+            Search your long-term episodic memory for relevant information.
+            
+            CRITICAL: Use this tool when the user asks about specific people, places, 
+            events, or facts that may have been discussed in past conversations.
+            
+            Examples when to use:
+            - "Wer ist Rita Süssmuth?" → recall_memories_tool("Rita Süssmuth")
+            - "What did we discuss about X?" → recall_memories_tool("discussion about X")
+            - "Do you remember Y?" → recall_memories_tool("Y")
+            
+            Returns memory snippets and knowledge graph triples with factual information.
+            """
             res = self.brain._get_relevant_memories(query)
             return "\n".join(res) if res else "No memories found."
+
         
         # Collect all tools (built-in + plugins)
         all_tools = [recall_memories_tool]

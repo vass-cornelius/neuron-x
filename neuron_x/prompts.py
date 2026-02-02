@@ -1,18 +1,119 @@
+from pathlib import Path
+import re
+import logging
+
+logger = logging.getLogger("neuron-x")
+
+def _discover_skills() -> str:
+    """
+    Discover available skills and return formatted description.
+    
+    For critical skills (like memory-retrieval), inject full content.
+    For others, just list them.
+    
+    Returns:
+        Formatted string listing available skills or empty string if none found
+    """
+    skills_dir = Path(__file__).parent.parent / ".agent" / "skills"
+    
+    if not skills_dir.exists():
+        return ""
+    
+    # Critical skills that should have full content injected
+    CRITICAL_SKILLS = {"memory-retrieval"}
+    
+    skills = []
+    full_skills = []
+    skill_count = 0
+    
+    for skill_path in skills_dir.iterdir():
+        if not skill_path.is_dir():
+            continue
+        
+        skill_file = skill_path / "SKILL.md"
+        if not skill_file.exists():
+            continue
+        
+        # Read skill metadata from frontmatter
+        try:
+            content = skill_file.read_text(encoding='utf-8')
+            
+            # Extract YAML frontmatter
+            if content.startswith('---'):
+                parts = content.split('---', 2)
+                if len(parts) >= 3:
+                    frontmatter = parts[1]
+                    skill_body = parts[2].strip()
+                    
+                    # Parse name and description
+                    name_match = re.search(r'name:\s*(.+)', frontmatter)
+                    desc_match = re.search(r'description:\s*(.+)', frontmatter)
+                    
+                    if name_match and desc_match:
+                        name = name_match.group(1).strip()
+                        description = desc_match.group(1).strip()
+                        skill_path_str = str(skill_file.relative_to(Path.cwd()))
+                        
+                        # Check if this is a critical skill
+                        if skill_path.name in CRITICAL_SKILLS:
+                            # Inject full content (truncate if too long)
+                            if len(skill_body) > 2000:
+                                skill_body = skill_body[:2000] + "\n\n[... truncated ...]"
+                            
+                            full_skills.append(f"\n## CRITICAL SKILL: {name}\n\n{skill_body}")
+                            logger.info(f"[SKILLS] Injected full content for critical skill: {name}")
+                        else:
+                            # Just list it
+                            skills.append(f"- **{name}**: {description}\n  → Read full skill: `{skill_path_str}`")
+                        
+                        skill_count += 1
+        
+        except Exception as e:
+            logger.warning(f"Failed to parse skill at {skill_file}: {e}")
+            continue
+    
+    if skill_count == 0:
+        return ""
+    
+    result = f"\n{'='*60}\nAVAILABLE SKILLS ({skill_count} found)\n{'='*60}\n"
+    
+    # Add full critical skills first
+    if full_skills:
+        result += "".join(full_skills)
+        result += "\n"
+    
+    # Then list other skills
+    if skills:
+        result += "\nOther Skills:\n" + "\n".join(skills)
+    
+    result += f"\n{'='*60}\n"
+    
+    logger.info(f"[SKILLS] Discovered {skill_count} skill(s), {len(full_skills)} injected fully")
+    return result
+
 def get_system_instruction(summary: str, memory_injection: str, subconscious_injection: str) -> str:
     """Returns the formatted system instruction for the Gemini LLM."""
+    
+    # Discover available skills
+    skills_section = _discover_skills()
+    
     return f"""
             System Memory State: {summary}
             {memory_injection}
+            {skills_section}
             {subconscious_injection}
                     
             Du bist ein LLM, das in die kognitive Architektur "NEURON-X" integriert ist.
             
-            TOOLS:
-            - **recall_memories**: You have direct access to your episodic and semantic memory. 
-              If the user asks about something and you don't see it in 'RELEVANT LONG-TERM MEMORIES', 
-              USE THIS TOOL to look it up before answering "I don't know".
-
             KOGNITIVE RICHTLINIEN:
+            
+            0. **MEMORY FIRST**: When the user asks about a PERSON, PLACE, EVENT, or FACT:
+               → ALWAYS call recall_memories(query) FIRST before answering
+               → Example: User asks "Wer ist Rita Süssmuth?" → MUST call recall_memories("Rita Süssmuth")
+               → Do NOT rely on training data for specific people/events from conversations
+               → If recall_memories returns information, USE IT in your answer
+               → Only say "I don't know" AFTER checking memory
+
             1. **Präzision und Wahrheit**: Priorisiere vor allem „FAKTISCHE“ Tripel, die vom USER bereitgestellt werden. Wenn der USER seinen Namen angegeben hat, halluziniere keine anderen Namen.
             2. **Korrekturen anerkennen**: Wenn der USER zuvor einen Namen oder eine Tatsache abgelehnt hat, verwende diesen/diese NICHT erneut. Suche in deinem Speicher nach Knotenpunkten, die mit „halluzinierter Entität” oder „Ablehnung” in Verbindung stehen.
             3. **Relationale Konsistenz**: Stelle sicher, dass Namen und Beziehungen eine konsistente Struktur bilden. Abgeleitete Beziehungen dürfen nicht im Widerspruch zu etablierten Fakten über „mich/mich selbst” stehen.

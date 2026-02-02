@@ -604,7 +604,22 @@ class CognitiveCore:
                 )
             )
             
-            result = response.text.strip().lower()
+            # Extract text from response parts (avoid SDK warning)
+            result = ""
+            if hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'content') and candidate.content:
+                    parts = candidate.content.parts
+                    if parts:
+                        for part in parts:
+                            if hasattr(part, 'text') and part.text:
+                                result += part.text
+            
+            if not result:
+                logger.warning("[CRITIC] Empty validation response")
+                return True  # Conservative: accept if validator fails
+            
+            result = result.strip().lower()
             if "rejected" in result:
                 logger.warning(f"[bold red][CRITIC][/bold red] Thought Rejected: {thought_text}")
                 return False
@@ -791,7 +806,138 @@ class CognitiveCore:
                 )
             )
             
-            thought_text = response.text.strip()
+            # --- FUNCTION CALL HANDLING LOOP ---
+            # Allow LLM to execute tools autonomously (up to 3 iterations)
+            max_iterations = 3
+            iteration = 0
+            conversation_history = [full_prompt]
+            thought_text = ""  # Initialize before loop to ensure scope
+            
+            while iteration < max_iterations:
+                iteration += 1
+                
+                # Extract text from response, handling function calls properly
+                thought_text = ""  # Reset for this iteration
+                function_calls = []
+                
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    if hasattr(candidate, 'content') and candidate.content:
+                        parts = candidate.content.parts
+                        if parts:  # Check parts is not None
+                            for part in parts:
+                                if hasattr(part, 'text') and part.text:
+                                    thought_text += part.text
+                                elif hasattr(part, 'function_call') and part.function_call:
+                                    function_calls.append(part.function_call)
+                
+                # If we have text, we're done (or no function calls)
+                if thought_text and thought_text.strip() and not function_calls:
+                    thought_text = thought_text.strip()
+                    break
+                
+                # If we have text AND function calls, extract text and continue
+                if thought_text and thought_text.strip() and function_calls:
+                    # LLM is combining text with function calls - process calls then continue
+                    pass  # Fall through to function call execution
+                
+                # If no function calls, return empty response handling
+                if not function_calls:
+                    if not thought_text or not thought_text.strip():
+                        logger.warning("[NEURON-X] LLM returned empty response after iteration")
+                        return "Awaiting neural pathway stabilization..."
+                    thought_text = thought_text.strip()
+                    break
+                
+                # Execute function calls
+                logger.info(f"[AUTONOMOUS-TOOL] Executing {len(function_calls)} tool call(s) in background thought cycle")
+                function_responses = []
+                
+                for fc in function_calls:
+                    func_name = fc.name
+                    func_args = dict(fc.args) if fc.args else {}
+                    
+                    try:
+                        # Find the tool in our all_tools list
+                        tool_func = None
+                        for tool in all_tools:
+                            if hasattr(tool, '__name__') and tool.__name__ == func_name:
+                                tool_func = tool
+                                break
+                        
+                        if tool_func:
+                            logger.info(f"[AUTONOMOUS-TOOL] Calling {func_name} with args: {func_args}")
+                            result = tool_func(**func_args)
+                            function_responses.append(
+                                types.Part.from_function_response(
+                                    name=func_name,
+                                    response={"result": str(result)}
+                                )
+                            )
+                            logger.info(f"[AUTONOMOUS-TOOL] {func_name} returned {len(str(result))} chars")
+                        else:
+                            logger.warning(f"[AUTONOMOUS-TOOL] Tool {func_name} not found")
+                            function_responses.append(
+                                types.Part.from_function_response(
+                                    name=func_name,
+                                    response={"error": f"Tool {func_name} not found"}
+                                )
+                            )
+                    except Exception as e:
+                        logger.error(f"[AUTONOMOUS-TOOL] Error calling {func_name}: {e}")
+                        function_responses.append(
+                            types.Part.from_function_response(
+                                name=func_name,
+                                response={"error": str(e)}
+                            )
+                        )
+                
+                # Continue conversation with function results
+                # Build the conversation history properly
+                conversation_history.append(response.candidates[0].content)
+                conversation_history.append(types.Content(parts=function_responses))
+                
+                # If this is the last iteration, force a text response
+                if iteration >= max_iterations:
+                    logger.info("[AUTONOMOUS-TOOL] Max iterations reached, requesting final response")
+                    conversation_history.append(
+                        types.Content(parts=[types.Part.from_text(
+                            "Based on the tool results above, provide your final thought or reflection. Do not call any more tools."
+                        )])
+                    )
+                
+                # Call LLM again with function results
+                response = self.llm_client.models.generate_content(
+                    model="gemini-3-flash-preview",
+                    contents=conversation_history,
+                    config=types.GenerateContentConfig(
+                        system_instruction=full_system_instructions,
+                        max_output_tokens=2000,
+                        temperature=1.0,
+                        tools=all_tools if iteration < max_iterations else []  # No tools on final iteration
+                    )
+                )
+            
+            # Final check for thought_text
+            if not thought_text or not thought_text.strip():
+                logger.warning("[NEURON-X] No final text after tool execution loop")
+                # One more attempt to extract text from the last response
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    if hasattr(candidate, 'content') and candidate.content and candidate.content.parts:
+                        for part in candidate.content.parts:
+                            if hasattr(part, 'text') and part.text:
+                                thought_text += part.text
+                
+                if not thought_text or not thought_text.strip():
+                    return "Processing tool results..."
+            
+            thought_text = thought_text.strip()
+            
+            # Extra safety: ensure thought_text is never None
+            if thought_text is None:
+                logger.error("[NEURON-X] thought_text is None after processing")
+                return "Internal processing error..."
             
             # PARSE COMPLETION TRIGGER
             if ">> GOAL RESOLVED:" in thought_text:
@@ -828,7 +974,7 @@ class CognitiveCore:
                     thought_text = thought_content
 
             # --- CRITIC: VALIDATION PASS ---
-            if ">> GOAL RESOLVED:" not in response.text and ">> NEW GOAL:" not in response.text:
+            if ">> GOAL RESOLVED:" not in thought_text and ">> NEW GOAL:" not in thought_text:
                 is_valid = self._validate_thought(thought_text, summary)
                 if not is_valid:
                     return "..."
@@ -844,6 +990,39 @@ class CognitiveCore:
             # IPC BROADCAST
             context_data = goal_instruction if "URGENT CONFLICT RESOLUTION" in goal_instruction else None
             self._broadcast_thought(thought_text, thought_vec, priority="URGENT" if "URGENT CONFLICT RESOLUTION" in goal_instruction else "NORMAL", context_data=context_data)
+
+            # --- AUTONOMOUS OPTIMIZATION TRIGGER ---
+            # Configurable probability to check for optimization opportunities
+            # Default 5%, configurable via AUTONOMOUS_OPT_PROBABILITY env var
+            if self.plugin_tools_getter:
+                import os
+                probability = float(os.getenv('AUTONOMOUS_OPT_PROBABILITY', '0.05'))
+                roll = random.random()
+                if roll < probability:
+                    try:
+                        logger.info(f"[AUTO-OPT] Consciousness cycle triggered autonomous optimization scan (roll={roll:.4f}, threshold={probability})")
+                        plugin_tools = self.plugin_tools_getter()
+                        if plugin_tools and 'list_optimization_opportunities' in plugin_tools:
+                            # Check for high-priority opportunities
+                            opportunities_str = plugin_tools['list_optimization_opportunities'](limit=3)
+                            logger.debug(f"[AUTO-OPT] Opportunities found: {opportunities_str[:200]}")
+                            if opportunities_str and "Found" in opportunities_str and "No optimization" not in opportunities_str:
+                                # Add as a medium-priority goal
+                                self.add_goal(
+                                    f"Self-improvement opportunity detected: {opportunities_str[:100]}...",
+                                    priority=GoalPriority.MEDIUM
+                                )
+                                logger.info("[AUTO-OPT] Created goal for identified optimization opportunities")
+                            else:
+                                logger.debug("[AUTO-OPT] No actionable opportunities found or list was empty")
+                        else:
+                            logger.warning("[AUTO-OPT] optimizer plugin tools not available")
+                    except Exception as e:
+                        logger.error(f"[AUTO-OPT] Autonomous optimization check failed: {e}", exc_info=True)
+                else:
+                    logger.debug(f"[AUTO-OPT] Skipped this cycle (roll={roll:.4f} >= {probability})")
+            else:
+                logger.debug("[AUTO-OPT] plugin_tools_getter not available")
 
             return thought_text
 
@@ -866,5 +1045,61 @@ class CognitiveCore:
         """Retrieves latest thought."""
         data = self.smith.load_thought_stream("thought_stream.json")
         if data and time.time() - data.get("timestamp", 0) < 300:
-             return data["text"], np.array(data["vector"]), data.get("priority", "NORMAL"), data.get("context_data")
+            return data["text"], np.array(data["vector"]), data.get("priority", "NORMAL"), data.get("context_data")
         return None, None, "NORMAL", None
+
+    
+    def hot_reload(self, target: str) -> str:
+        """
+        Universal hot-reload for system components.
+        Targets: 'storage', 'memory', 'const', 'prompts', 'llm_tools', 'models'
+        """
+        import importlib
+        import sys
+        
+        # Mapping of logical components to modules and classes
+        registry = {
+            "storage":   {"mod": "neuron_x.storage",   "cls": "GraphSmith",   "attr": "smith"},
+            "memory":    {"mod": "neuron_x.memory",    "cls": "VectorVault",  "attr": "vault"},
+            "const":     {"mod": "neuron_x.const",     "cls": None,           "attr": None},
+            "prompts":   {"mod": "neuron_x.prompts",   "cls": None,           "attr": None},
+            "llm_tools": {"mod": "neuron_x.llm_tools", "cls": None,           "attr": None},
+            "models":    {"mod": "models",             "cls": None,           "attr": None}
+        }
+        
+        if target not in registry:
+            return f"Reload-Target '{target}' is not registered."
+        
+        conf = registry[target]
+        module_name = conf["mod"]
+        
+        try:
+            # 1. Reload module (from sys.modules or import new)
+            if module_name in sys.modules:
+                reloaded_mod = importlib.reload(sys.modules[module_name])
+            else:
+                reloaded_mod = importlib.import_module(module_name)
+            
+            # 2. If there is an active instance in CognitiveCore, replace it
+            if conf["cls"] and conf["attr"]:
+                new_class = getattr(reloaded_mod, conf["cls"])
+                with self.lock:
+                    old_instance = getattr(self, conf["attr"])
+                    
+                    # Specific re-initialization depending on the component
+                    if target == "storage":
+                        # Keep path, create new instance
+                        setattr(self, conf["attr"], new_class(old_instance.path))
+                    elif target == "memory":
+                        # Re-instantiate Vault (cache builds on next access)
+                        setattr(self, conf["attr"], new_class())
+                
+                logger.info(f"[bold yellow][SYSTEM][/bold yellow] Component '{target}' was hot-reloaded.")
+                return f"Success: {target} was reloaded and the instance in the core was replaced."
+            
+            return f"Success: Module {module_name} was reloaded."
+        
+        except Exception as e:
+            error_msg = f"Hot-Reload for {target} failed: {e}"
+            logger.error(error_msg)
+            return error_msg

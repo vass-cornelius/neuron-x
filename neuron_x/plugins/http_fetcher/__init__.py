@@ -159,11 +159,14 @@ class HttpFetcherPlugin(BasePlugin):
     
     def fetch_url_content(self, url: str, timeout: int = 30) -> str:
         """
-        Fetch and return the text content of a URL.
+        Fetch and return the text content of a URL (HTTP/HTTPS only).
         
         This is a simplified version of fetch_file that always returns content
         as a string, useful for quickly retrieving web page content, API responses,
         or text files.
+        
+        NOTE: This tool is for REMOTE URLs only. To read local codebase files,
+        use the read_codebase_file tool instead.
         
         Args:
             url: The URL to fetch (must be http:// or https://)
@@ -175,4 +178,12 @@ class HttpFetcherPlugin(BasePlugin):
         Example:
             - fetch_url_content("https://api.example.com/data") → Returns API response
         """
+        # Reject file:// URLs
+        if url.startswith('file://'):
+            return (
+                "Error: file:// URLs are not supported. "
+                "To read local codebase files, use the read_codebase_file tool instead. "
+                "Example: read_codebase_file('neuron_x/cognition.py')"
+            )
+        
         return self.fetch_file(url=url, destination=None, timeout=timeout)
