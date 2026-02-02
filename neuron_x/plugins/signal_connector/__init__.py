@@ -1,1 +1,1 @@
-from .signal_plugin import SignalPlugin
+from .signal_plugin import SignalConnectorPlugin
