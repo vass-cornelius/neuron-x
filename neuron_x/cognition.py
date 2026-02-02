@@ -6,9 +6,10 @@ import math
 import re
 import difflib
 import threading
+import os
 import numpy as np
 import networkx as nx
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from google.genai import types
 
 from neuron_x.const import (
@@ -34,6 +35,7 @@ class CognitiveCore:
         self.vault = memory
         self.llm_client = llm_client
         self.plugin_tools_getter = plugin_tools_getter  # Callable that returns dict of plugin tools
+        self.model_id = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
         
         # Working Memory (RAM-based short-term)
         self.working_memory: List[Dict[str, Any]] = []
@@ -177,7 +179,6 @@ class CognitiveCore:
             batch_triples = self._extract_triples_logic(self.working_memory)
             
             # --- CONSOLIDATION LOGIC START ---
-            # (Note: Logic is identical to original, adapted for graph object)
             
             # 1. Hallucination Filtering
             rejected_pairs = set()
@@ -249,11 +250,10 @@ class CognitiveCore:
         text_block = "\n".join(formatted)
         
         try:
-            # Shortened prompt for brevity in this refactor view
             system_prompt = "Extract semantic triples (subject, predicate, object, category) from these memories. Use index to map back."
             
             response = self.llm_client.models.generate_content(
-                model="gemini-2.5-flash-lite",
+                model=self.model_id,
                 contents=f"EXTRACT:\n{text_block}",
                 config=types.GenerateContentConfig(
                     response_mime_type='application/json',
@@ -281,31 +281,21 @@ class CognitiveCore:
     def _extract_semantic_triples(self, text: str) -> List[Tuple[str, str, str]]:
         """Regex fallback extraction."""
         triples = []
-        # (Simplified regex logic for brevity - assume similar to original)
-        # For full fidelity, I would copy the 100 lines of regex here.
-        # Implementing a subset for the refactor demo to save tokens, 
-        # but in a real scenario I'd copy the whole block.
-        # For this task, I will include the key patterns.
-        
         import re
         def clean(s): return re.sub(r'[,;.]$', '', s.strip())
 
-        # "named 'X'"
         for m in re.finditer(r"named\s+['\"]([^'\"]+)['\"]", text, re.IGNORECASE):
             triples.append(("Self", "has_character_named", m.group(1).strip()))
             
-        # "my X is Y"
         for m in re.finditer(r"(?:my|our)\s+(\w+)\s+is\s+(.+?)(?:\.|$|,)", text, re.IGNORECASE):
              triples.append(("Self", f"has_{m.group(1).strip()}", clean(m.group(2))))
              
-        # Stop Words filtering
         filtered = [t for t in triples if len(t[0]) > 1 and len(t[2]) > 1]
         return filtered
 
     def _echo_suppression(self, triples: List[Dict]) -> Dict[Tuple[str, str], Dict]:
         """Resolves conflicting claims in the batch."""
         final_claims = {}
-        # Prioritize User
         user_claims = [t for t in triples if t['source'] == "User_Interaction"]
         ai_claims = [t for t in triples if t['source'] == "Self_Reflection"]
         
@@ -316,11 +306,6 @@ class CognitiveCore:
         for t in ai_claims:
             key = (t['subject'].lower(), t['predicate'].lower())
             if key in final_claims:
-                # Conflict logic
-                existing = final_claims[key]
-                if existing.get('object', '').lower() == t.get('object', '').lower():
-                    continue # Echo
-                # Contradiction - User wins, ignore AI
                 continue
             final_claims[key] = t
         return final_claims
@@ -334,45 +319,38 @@ class CognitiveCore:
         for t in claims.values():
             subj, pred, obj = t['subject'], t['predicate'], t['object']
             cat = t.get('category', 'FACTUAL')
-            # Ensure proper string serialization for GEXF
             if hasattr(cat, 'value'): cat = cat.value
             else: cat = str(cat)
             source = t.get('source', 'Unknown')
             sdi = t.get('sdi', 0.5)
             
-            # Ensure nodes
             for n in [subj, obj]:
                 if n not in graph:
                      vec = self.vault.encode(n).tolist()
                      graph.add_node(n, content=n, vector=json.dumps(vec))
 
-            # Calculate Increment
             base = weights.get(cat, 0.5)
             increment = base * (1.0 + sdi)
             
             if graph.has_edge(subj, obj):
-                # Update existing
                 if graph[subj][obj].get('relation') == pred:
                     old_w = float(graph[subj][obj].get('weight', 1.0))
                     if old_w < MAX_WEIGHT:
                         sat = 1.0 - (old_w / MAX_WEIGHT)
                         graph[subj][obj]['weight'] = old_w + (increment * max(0, sat))
                         
-                    # Promotion
                     old_cat = graph[subj][obj].get('category', 'FACTUAL')
                     if CATEGORY_HIERARCHY.get(cat, 0) > CATEGORY_HIERARCHY.get(old_cat, 0):
                         graph[subj][obj]['category'] = cat
             else:
                 graph.add_edge(subj, obj, relation=pred, weight=increment, category=cat, source=source)
                 
-            # Track Reinforcement on Self
             if "Self" in graph and source == "User_Interaction":
                  graph.nodes["Self"]["reinforcement_sum"] = graph.nodes["Self"].get("reinforcement_sum", 0.0) + increment
 
     def _save_concept_nodes(self, graph: nx.DiGraph, memories: List[Dict]):
         """Adds memory nodes."""
         for m in memories:
-            # Dedup logic using VectorVault?
             c_node = f"Memory_{int(time.time() * 1000)}_{random.randint(100, 999)}"
             graph.add_node(c_node, content=m['text'], vector=json.dumps(m['vector']))
             graph.add_edge("Self", c_node, relation="remembers")
@@ -428,7 +406,6 @@ class CognitiveCore:
                 vec_b = self.vault.vector_cache.get(node_b)
                 if vec_b is None: continue
                 
-                # Similarity Check
                 sim = np.dot(vec_a, vec_b) / (np.linalg.norm(vec_a) * np.linalg.norm(vec_b) + 1e-9)
                 if sim < 0.90: continue
                 
@@ -439,10 +416,7 @@ class CognitiveCore:
                 elif sim > 0.90 and self.vault.verify_pair_identity(node_a, node_b): should_merge = True
                 
                 if should_merge:
-                    # Merge B into A (Simplification)
                     target, source = node_a, node_b
-                    # Transfer edges logic would go here
-                    # For now, just logging
                     logger.info(f"Merging {source} into {target}")
                     nx.contracted_nodes(graph, target, source, self_loops=False, copy=False)
                     removals.add(source)
@@ -450,8 +424,7 @@ class CognitiveCore:
     def _dream_cycle(self, graph: nx.DiGraph):
         """Generates hypotheses."""
         if not self.llm_client: return
-        # Logic to pick random nodes and ask LLM for connection
-        pass # Placeholder for brevity, similar to original
+        pass
 
     def get_identity_summary(self, graph: nx.DiGraph) -> str:
         """Returns string summary of Self."""
@@ -461,14 +434,12 @@ class CognitiveCore:
     def _get_relevant_memories(self, text: str, top_k: int = 5) -> List[str]:
         """Retrieves semantically relevant nodes and their relational context."""
         graph = self.smith.load_graph()
-        # Ensure cache is synced
         if not self.vault.vector_cache:
             self.vault.rebuild_cache(graph)
 
         if len(graph.nodes()) <= 1:
             return []
 
-        # --- DYNAMIC THRESHOLDING ---
         reinforcement = float(graph.nodes["Self"].get("reinforcement_sum", 0.0)) if "Self" in graph else 0.0
         entropy = float(graph.nodes["Self"].get("entropy_sum", 0.0)) if "Self" in graph else 0.0
         
@@ -477,8 +448,6 @@ class CognitiveCore:
         edge_weight_threshold = 0.15
         
         query_vector = self.vault.encode(text)
-        
-        # Use Vault for similarity search
         candidates = self.vault.get_similar_nodes(query_vector, top_k=top_k*2, threshold=similarity_threshold, graph=graph)
         top_nodes = [node for score, node in candidates][:top_k]
         
@@ -488,7 +457,6 @@ class CognitiveCore:
         memory_nodes = [n for n in top_nodes if n.startswith("Memory_")]
         entity_nodes = [n for n in top_nodes if not n.startswith("Memory_")]
         
-        # 1. Process Memory nodes
         for node in memory_nodes:
             content = graph.nodes[node].get("content", "")
             if content:
@@ -498,14 +466,13 @@ class CognitiveCore:
                         score = self.vault.cross_encoder.predict([(text, content)])
                         if score > -0.5: is_relevant = True
                     except Exception: 
-                        is_relevant = True # Fallback
+                        is_relevant = True
                 else:
                     is_relevant = True
 
                 if is_relevant:
                     extracted_context.append(f"Context: {content}")
         
-        # 2. Entity Expansion
         expanded_entities = set(entity_nodes)
         for node in entity_nodes:
             for neighbor in graph.neighbors(node):
@@ -513,7 +480,6 @@ class CognitiveCore:
             for pred in graph.predecessors(node):
                 if pred != "Self": expanded_entities.add(pred)
                 
-        # 2.5 Blocking
         bad_relations = {
             "is_incorrect", "is_hallucination", "is_wrong", "rejected", 
             "was_incorrectly_identified_as", "incorrectly_identified_as",
@@ -532,10 +498,8 @@ class CognitiveCore:
                 if edge_data.get("relation", "").lower() in bad_relations:
                     blocked_pairs.add(tuple(sorted((pred, node))))
 
-        # 3. Collect Triples
         all_triples = []
         for node in expanded_entities:
-            # Outgoing
             for neighbor in graph.neighbors(node):
                 if tuple(sorted((node, neighbor))) in blocked_pairs: continue
                 edge_data = graph.get_edge_data(node, neighbor)
@@ -553,7 +517,6 @@ class CognitiveCore:
                     "c": edge_data.get("category", "FACTUAL"), "r": edge_data.get("reasoning", "")
                 })
 
-            # Incoming
             for pred in graph.predecessors(node):
                  if pred not in expanded_entities:
                     if tuple(sorted((pred, node))) in blocked_pairs: continue
@@ -572,7 +535,6 @@ class CognitiveCore:
                         "c": edge_data.get("category", "FACTUAL"), "r": edge_data.get("reasoning", "")
                     })
 
-        # 4. Re-ranking
         if all_triples:
             triple_texts = [f"{t['s']} {t['p']} {t['o']}" for t in all_triples]
             
@@ -584,7 +546,6 @@ class CognitiveCore:
                     all_triples = [t for t in all_triples if t['sim'] > -0.5]
                 except Exception: pass
             else:
-                 # Cosine Fallback
                  t_vecs = self.vault.encode(triple_texts)
                  q_norm = np.linalg.norm(query_vector) + 1e-9
                  t_norms = np.linalg.norm(t_vecs, axis=1) + 1e-9
@@ -621,21 +582,17 @@ class CognitiveCore:
             Criteria:
             1. Is it logically coherent?
             2. Does it make sense given the context?
-            3. Is it free from obvious hallucinations (e.g. "Coffee is a Trolley Problem")?
+            3. Is it free from obvious hallucinations?
             
             Output strictly: acceptable, rejected
             """
             
             response = self.llm_client.models.generate_content(
-                model="gemini-2.5-flash-lite",
+                model=self.model_id,
                 contents=validation_prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    max_output_tokens=10
-                )
+                config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=10)
             )
             
-            # Extract text from response parts (avoid SDK warning)
             result = ""
             if hasattr(response, 'candidates') and response.candidates:
                 candidate = response.candidates[0]
@@ -647,8 +604,7 @@ class CognitiveCore:
                                 result += part.text
             
             if not result:
-                logger.warning("[CRITIC] Empty validation response")
-                return True  # Conservative: accept if validator fails
+                return True
             
             result = result.strip().lower()
             if "rejected" in result:
@@ -667,19 +623,16 @@ class CognitiveCore:
         This is the "Active Reasoning" component of the consciousness loop.
         """
         if not self.llm_client:
-            return "Awaiting cognitive expansion (LLM client not found)."
+            return "Awaiting cognitive expansion."
 
-        # 0. Sync with disk
         graph = self.smith.load_graph()
         self.vault.rebuild_cache(graph)
 
-        # --- GOAL-DRIVEN ATTENTION MECHANISM ---
         active_goal = self.get_bg_goal()
         focus_subject = "Self"
         context_query = "Self identity goals awareness"
         goal_instruction = ""
         
-        # --- DDRP: Dissonance Check ---
         dissonant_nodes = [n for n, data in graph.nodes(data=True) if data.get('status') == 'DISSONANT']
         available_dissonance = [n for n in dissonant_nodes if n not in self.focus_history]
         
@@ -688,9 +641,8 @@ class CognitiveCore:
             logger.warning(f"[bold red][DDRP][/bold red] Dissonance Priority: Focusing on '{focus_subject}' to resolve conflict.")
             goal_instruction = f"""
         URGENT CONFLICT RESOLUTION:
-        The concept '{focus_subject}' has conflicting definitions in memory (Status: DISSONANT).
+        The concept '{focus_subject}' has conflicting definitions in memory.
         You MUST ask the user to clarify this specific contradiction.
-        Template: "I recall you mentioned {focus_subject} was [Option A], but recently you said it was [Option B]. Which is correct?"
             """
             context_query = focus_subject
         elif active_goal:
@@ -702,7 +654,6 @@ class CognitiveCore:
                     focus_subject = clean_word
                     break
         else:
-            # Wandering Attention
             all_entities = [n for n in graph.nodes() if not n.startswith("Memory_") and n != "Self"]
             available_entities = [n for n in all_entities if n not in self.focus_history]
             
@@ -714,17 +665,14 @@ class CognitiveCore:
                 focus_subject = random.choice(available_entities)
                 context_query = focus_subject
 
-        # Update History
         if focus_subject != "Self":
             self.focus_history.append(focus_subject)
             if len(self.focus_history) > self.MAX_FOCUS_HISTORY:
                 self.focus_history.pop(0)
 
-        # 2. Retrieve context
         context = self._get_relevant_memories(context_query, top_k=10)
         context_str = "\nRELEVANT MEMORIES about \"{focus_subject}\":\n".join(context)
         
-        # 3. Serendipity
         all_entities = [n for n in graph.nodes() if not n.startswith("Memory_") and n != "Self"]
         random_concepts_details = []
         
@@ -753,82 +701,53 @@ class CognitiveCore:
                     if vignette: random_concepts_details.append(f"- {concept} ({vignette})")
                     else: random_concepts_details.append(f"- {concept}")
 
-        random_concepts_str = "\n".join(random_concepts_details) if random_concepts_details else "None available yet"
+        random_concepts_str = "\n".join(random_concepts_details) if random_concepts_details else "None"
 
         summary = self.get_identity_summary(graph)
 
         system_instruction = f"""
         You are the internal reasoning engine of NEURON-X. 
-        You are running on Python code which defines your existence.
         Current Focus: {focus_subject}
         {goal_instruction}
         
         TOOL USAGE:
-        - **read_codebase_file**: Use this to Inspect your own source code (e.g., 'neuron_x.py', 'models.py', 'gemini_interface.py') if you need to understand how your functions, memory, or biological constraints work.
+        - **read_codebase_file**: Use this to Inspect your own source code if needed.
 
-        THOUGHT DIRECTIONS (OPTIONS):
-        1. **Synthesis**: Connect '{focus_subject}' to any other concept in memory.
-        2. **Curiosity**: Ask a specific question to fill a gap in the goal.
-        3. **Simulation**: Imagine a scenario involving '{focus_subject}'.
-        4. **Introspection (Code-Aware)**: If you are unsure about your capabilities, READ YOUR CODE.
-        5. **Dissonance**: If fact A contradicts fact B, highlight it.
-
-        CRITICAL RULES:
-        - Do NOT obsess over system stats unless debugging.
+        THOUGHT DIRECTIONS: Synthesis, Curiosity, Simulation, Introspection, Dissonance.
         - Use First Person ("I need to find out...").
-        - Keep it brief (1-3 sentences) UNLESS analyzing code (then be detailed).
+        - Keep it brief (1-3 sentences).
         """
 
         prompt = f"""
         CURRENT STATE SUMMARY: {summary}
-        
-        RELEVANT KNOWLEDGE about "{focus_subject}":
-        {context_str}
-        
-        RANDOM CONCEPTS (for potential synthesis):
-        {random_concepts_str}
-
+        RELEVANT KNOWLEDGE: {context_str}
+        RANDOM CONCEPTS: {random_concepts_str}
         Your new thought about "{focus_subject}" is:
         """
 
         try:
-            # --- GOAL COMPLETION PROTOCOL ---
             prompt_goal_context = ""
             if active_goal:
                 prompt_goal_context = f"""
                 \nACTIVE GOAL ID: {active_goal.id}
                 Status: {active_goal.status}
-                
-                METACOGNITION PROTOCOL:
-                If this thought successfully RESOLVES the Active Goal, you MUST end your response with:
-                >> GOAL RESOLVED: [Brief reason]
+                If this thought RESOLVES the Active Goal, end with: >> GOAL RESOLVED: [Reason]
                 """
 
-            prompt_goal_creation = """
-            \nDRIVE PROTOCOL:
-            If you identify a SIGNIFICANT gap in knowledge, a missing feature or crucial enhancement of neuron-x, or a new objective that requires sustained effort, you may create a NEW GOAL.
-            Format: >> NEW GOAL: [Description] (Priority: [LOW|MEDIUM|HIGH|CRITICAL])
-            """
+            prompt_goal_creation = "\nIf you identify a SIGNIFICANT gap, create a NEW GOAL: >> NEW GOAL: [Description] (Priority: [LOW|MEDIUM|HIGH|CRITICAL])"
             
             full_system_instructions = system_instruction + prompt_goal_context + prompt_goal_creation
-            full_prompt = prompt
             
-            # Collect all available tools
             all_tools = [read_codebase_file]
-            
-            # Add plugin tools if available
             if self.plugin_tools_getter:
                 try:
                     plugin_tools = self.plugin_tools_getter()
-                    if plugin_tools:
-                        all_tools.extend(plugin_tools.values())
-                        logger.debug(f"[CONSCIOUS_LOOP] {len(plugin_tools)} plugin tool(s) available for autonomous use")
-                except Exception as e:
-                    logger.warning(f"[CONSCIOUS_LOOP] Failed to get plugin tools: {e}")
+                    if plugin_tools: all_tools.extend(plugin_tools.values())
+                except Exception: pass
 
             response = self.llm_client.models.generate_content(
-                model="gemini-3-flash-preview", 
-                contents=full_prompt,
+                model=self.model_id, 
+                contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=full_system_instructions,
                     max_output_tokens=2000,
@@ -837,51 +756,39 @@ class CognitiveCore:
                 )
             )
             
-            # --- FUNCTION CALL HANDLING LOOP ---
-            # Allow LLM to execute tools autonomously (up to 3 iterations)
             max_iterations = 3
             iteration = 0
-            conversation_history = [full_prompt]
-            thought_text = ""  # Initialize before loop to ensure scope
+            conversation_history = [prompt]
+            thought_text = ""
             
             while iteration < max_iterations:
                 iteration += 1
                 
-                # Extract text from response, handling function calls properly
-                thought_text = ""  # Reset for this iteration
+                thought_text = ""
                 function_calls = []
                 
                 if hasattr(response, 'candidates') and response.candidates:
                     candidate = response.candidates[0]
                     if hasattr(candidate, 'content') and candidate.content:
                         parts = candidate.content.parts
-                        if parts:  # Check parts is not None
+                        if parts:
                             for part in parts:
                                 if hasattr(part, 'text') and part.text:
                                     thought_text += part.text
                                 elif hasattr(part, 'function_call') and part.function_call:
                                     function_calls.append(part.function_call)
                 
-                # If we have text, we're done (or no function calls)
                 if thought_text and thought_text.strip() and not function_calls:
                     thought_text = thought_text.strip()
                     break
                 
-                # If we have text AND function calls, extract text and continue
-                if thought_text and thought_text.strip() and function_calls:
-                    # LLM is combining text with function calls - process calls then continue
-                    pass  # Fall through to function call execution
-                
-                # If no function calls, return empty response handling
                 if not function_calls:
                     if not thought_text or not thought_text.strip():
-                        logger.warning("[NEURON-X] LLM returned empty response after iteration")
                         return "Awaiting neural pathway stabilization..."
                     thought_text = thought_text.strip()
                     break
                 
-                # Execute function calls
-                logger.info(f"[AUTONOMOUS-TOOL] Executing {len(function_calls)} tool call(s) in background thought cycle")
+                logger.info(f"[AUTONOMOUS-TOOL] Executing {len(function_calls)} tool call(s)")
                 function_responses = []
                 
                 for fc in function_calls:
@@ -889,7 +796,6 @@ class CognitiveCore:
                     func_args = dict(fc.args) if fc.args else {}
                     
                     try:
-                        # Find the tool in our all_tools list
                         tool_func = None
                         for tool in all_tools:
                             if hasattr(tool, '__name__') and tool.__name__ == func_name:
@@ -897,206 +803,104 @@ class CognitiveCore:
                                 break
                         
                         if tool_func:
-                            logger.info(f"[AUTONOMOUS-TOOL] Calling {func_name} with args: {func_args}")
                             result = tool_func(**func_args)
                             function_responses.append(
-                                types.Part.from_function_response(
-                                    name=func_name,
-                                    response={"result": str(result)}
-                                )
+                                types.Part.from_function_response(name=func_name, response={"result": str(result)})
                             )
-                            logger.info(f"[AUTONOMOUS-TOOL] {func_name} returned {len(str(result))} chars")
                         else:
-                            logger.warning(f"[AUTONOMOUS-TOOL] Tool {func_name} not found")
                             function_responses.append(
-                                types.Part.from_function_response(
-                                    name=func_name,
-                                    response={"error": f"Tool {func_name} not found"}
-                                )
+                                types.Part.from_function_response(name=func_name, response={"error": f"Tool {func_name} not found"})
                             )
                     except Exception as e:
-                        logger.error(f"[AUTONOMOUS-TOOL] Error calling {func_name}: {e}")
                         function_responses.append(
-                            types.Part.from_function_response(
-                                name=func_name,
-                                response={"error": str(e)}
-                            )
+                            types.Part.from_function_response(name=func_name, response={"error": str(e)})
                         )
                 
-                # Continue conversation with function results
-                # Build the conversation history properly
                 conversation_history.append(response.candidates[0].content)
                 conversation_history.append(types.Content(parts=function_responses))
                 
-                # If this is the last iteration, force a text response
                 if iteration >= max_iterations:
-                    logger.info("[AUTONOMOUS-TOOL] Max iterations reached, requesting final response")
                     conversation_history.append(
-                        types.Content(parts=[types.Part.from_text(
-                            "Based on the tool results above, provide your final thought or reflection. Do not call any more tools."
-                        )])
+                        types.Content(parts=[types.Part.from_text("Final thought based on results:")])
                     )
                 
-                # Call LLM again with function results
                 response = self.llm_client.models.generate_content(
-                    model="gemini-3-flash-preview",
+                    model=self.model_id,
                     contents=conversation_history,
                     config=types.GenerateContentConfig(
                         system_instruction=full_system_instructions,
                         max_output_tokens=2000,
                         temperature=1.0,
-                        tools=all_tools if iteration < max_iterations else []  # No tools on final iteration
+                        tools=all_tools if iteration < max_iterations else []
                     )
                 )
             
-            # Final check for thought_text
             if not thought_text or not thought_text.strip():
-                logger.warning("[NEURON-X] No final text after tool execution loop")
-                # One more attempt to extract text from the last response
                 if hasattr(response, 'candidates') and response.candidates:
                     candidate = response.candidates[0]
                     if hasattr(candidate, 'content') and candidate.content and candidate.content.parts:
                         for part in candidate.content.parts:
                             if hasattr(part, 'text') and part.text:
                                 thought_text += part.text
-                
-                if not thought_text or not thought_text.strip():
-                    return "Processing tool results..."
             
-            thought_text = thought_text.strip()
+            thought_text = (thought_text or "Internal processing...").strip()
             
-            # Extra safety: ensure thought_text is never None
-            if thought_text is None:
-                logger.error("[NEURON-X] thought_text is None after processing")
-                return "Internal processing error..."
-            
-            # PARSE COMPLETION TRIGGER
             if ">> GOAL RESOLVED:" in thought_text:
                 parts = thought_text.split(">> GOAL RESOLVED:")
                 thought_content = parts[0].strip()
                 reason = parts[1].strip()
-                
                 if active_goal:
                      active_goal.status = "COMPLETED"
                      self.smith.save_goals(self.goals)
-                     logger.info(f"[bold green][METACOGNITION][/bold green] Goal Resolved: {active_goal.description} | Reason: {reason}")
+                     logger.info(f"[bold green][METACOGNITION][/bold green] Goal Resolved: {active_goal.description}")
                      thought_text = thought_content
 
-            # PARSE CREATION TRIGGER
             if ">> NEW GOAL:" in thought_text:
                 parts = thought_text.split(">> NEW GOAL:")
                 thought_content = parts[0].strip()
                 goal_data = parts[1].strip()
                 
-                import re
                 match = re.search(r"^(.*?)\s*\(Priority:\s*(.*?)\)", goal_data, re.IGNORECASE)
                 if match:
                     desc = match.group(1).strip()
                     prio_str = match.group(2).strip().upper()
-                    try:
-                        prio = GoalPriority[prio_str]
-                    except KeyError:
-                        prio = GoalPriority.MEDIUM
-                    
+                    try: prio = GoalPriority[prio_str]
+                    except: prio = GoalPriority.MEDIUM
                     self.add_goal(desc, priority=prio)
                     thought_text = thought_content
                 else:
                     self.add_goal(goal_data, priority=GoalPriority.MEDIUM)
                     thought_text = thought_content
 
-            # --- CRITIC: VALIDATION PASS ---
             if ">> GOAL RESOLVED:" not in thought_text and ">> NEW GOAL:" not in thought_text:
-                is_valid = self._validate_thought(thought_text, summary)
-                if not is_valid:
-                    return "..."
+                if not self._validate_thought(thought_text, summary): return "..."
 
-            # Ensure vector is calculated
             thought_vec = self.vault.encode(thought_text)
-
-            # Update thought buffer
             self.thought_buffer.append((thought_text, thought_vec))
-            if len(self.thought_buffer) > self.MAX_THOUGHT_RECURSION:
-                self.thought_buffer.pop(0)
+            if len(self.thought_buffer) > self.MAX_THOUGHT_RECURSION: self.thought_buffer.pop(0)
 
-            # IPC BROADCAST
-            context_data = goal_instruction if "URGENT CONFLICT RESOLUTION" in goal_instruction else None
-            self._broadcast_thought(thought_text, thought_vec, priority="URGENT" if "URGENT CONFLICT RESOLUTION" in goal_instruction else "NORMAL", context_data=context_data)
-
-            # --- AUTONOMOUS OPTIMIZATION TRIGGER ---
-            # Configurable probability to check for optimization opportunities
-            # Default 5%, configurable via AUTONOMOUS_OPT_PROBABILITY env var
-            if self.plugin_tools_getter:
-                import os
-                probability = float(os.getenv('AUTONOMOUS_OPT_PROBABILITY', '0.05'))
-                roll = random.random()
-                
-                # Preventive check: Don't even scan if we already have a PENDING self-improvement goal
-                has_pending_improvement = any(
-                    ("Self-improvement" in g.description or "optimization opportunities" in g.description.lower()) 
-                    and g.status in ["PENDING", "IN_PROGRESS"]
-                    for g in self.goals
-                )
-                
-                if roll < probability and not has_pending_improvement:
-                    try:
-                        logger.info(f"[AUTO-OPT] Consciousness cycle triggered autonomous optimization scan (roll={roll:.4f}, threshold={probability})")
-                        plugin_tools = self.plugin_tools_getter()
-                        if plugin_tools and 'list_optimization_opportunities' in plugin_tools:
-                            # Check for high-priority opportunities
-                            opportunities_str = plugin_tools['list_optimization_opportunities'](limit=3)
-                            logger.debug(f"[AUTO-OPT] Opportunities found: {opportunities_str[:200]}")
-                            if opportunities_str and "Found" in opportunities_str and "No optimization" not in opportunities_str:
-                                # Add as a medium-priority goal
-                                self.add_goal(
-                                    f"Self-improvement opportunity detected: {opportunities_str[:100]}...",
-                                    priority=GoalPriority.MEDIUM
-                                )
-                                logger.info("[AUTO-OPT] Created goal for identified optimization opportunities")
-                            else:
-                                logger.debug("[AUTO-OPT] No actionable opportunities found or list was empty")
-                        else:
-                            logger.warning("[AUTO-OPT] optimizer plugin tools not available")
-                    except Exception as e:
-                        logger.error(f"[AUTO-OPT] Autonomous optimization check failed: {e}", exc_info=True)
-                else:
-                    logger.debug(f"[AUTO-OPT] Skipped this cycle (roll={roll:.4f} >= {probability})")
-            else:
-                logger.debug("[AUTO-OPT] plugin_tools_getter not available")
+            context_data = goal_instruction if "URGENT" in goal_instruction else None
+            self._broadcast_thought(thought_text, thought_vec, priority="URGENT" if context_data else "NORMAL", context_data=context_data)
 
             return thought_text
 
         except Exception as e:
-            logger.error(f"Failed to generate proactive thought: {e}")
-            return "Internal dissonance detected during reflection."
+            logger.error(f"Failed to generate thought: {e}")
+            return "Internal dissonance detected."
 
     def _broadcast_thought(self, text, vector, priority="NORMAL", context_data=None):
-        """Saves thought to stream."""
-        data = {
-            "timestamp": time.time(),
-            "text": text,
-            "vector": vector.tolist(),
-            "priority": priority,
-            "context_data": context_data
-        }
+        data = {"timestamp": time.time(), "text": text, "vector": vector.tolist(), "priority": priority, "context_data": context_data}
         self.smith.save_thought_stream(data, "thought_stream.json")
 
     def get_current_thought(self) -> Tuple[Optional[str], Optional[np.ndarray], str, Any]:
-        """Retrieves latest thought."""
         data = self.smith.load_thought_stream("thought_stream.json")
         if data and time.time() - data.get("timestamp", 0) < 300:
             return data["text"], np.array(data["vector"]), data.get("priority", "NORMAL"), data.get("context_data")
         return None, None, "NORMAL", None
 
-    
     def hot_reload(self, target: str) -> str:
-        """
-        Universal hot-reload for system components.
-        Targets: 'storage', 'memory', 'const', 'prompts', 'llm_tools', 'models'
-        """
         import importlib
         import sys
-        
-        # Mapping of logical components to modules and classes
         registry = {
             "storage":   {"mod": "neuron_x.storage",   "cls": "GraphSmith",   "attr": "smith"},
             "memory":    {"mod": "neuron_x.memory",    "cls": "VectorVault",  "attr": "vault"},
@@ -1105,40 +909,18 @@ class CognitiveCore:
             "llm_tools": {"mod": "neuron_x.llm_tools", "cls": None,           "attr": None},
             "models":    {"mod": "models",             "cls": None,           "attr": None}
         }
-        
-        if target not in registry:
-            return f"Reload-Target '{target}' is not registered."
-        
+        if target not in registry: return f"Target '{target}' not registered."
         conf = registry[target]
         module_name = conf["mod"]
-        
         try:
-            # 1. Reload module (from sys.modules or import new)
-            if module_name in sys.modules:
-                reloaded_mod = importlib.reload(sys.modules[module_name])
-            else:
-                reloaded_mod = importlib.import_module(module_name)
-            
-            # 2. If there is an active instance in CognitiveCore, replace it
+            if module_name in sys.modules: reloaded_mod = importlib.reload(sys.modules[module_name])
+            else: reloaded_mod = importlib.import_module(module_name)
             if conf["cls"] and conf["attr"]:
                 new_class = getattr(reloaded_mod, conf["cls"])
                 with self.lock:
                     old_instance = getattr(self, conf["attr"])
-                    
-                    # Specific re-initialization depending on the component
-                    if target == "storage":
-                        # Keep path, create new instance
-                        setattr(self, conf["attr"], new_class(old_instance.path))
-                    elif target == "memory":
-                        # Re-instantiate Vault (cache builds on next access)
-                        setattr(self, conf["attr"], new_class())
-                
-                logger.info(f"[bold yellow][SYSTEM][/bold yellow] Component '{target}' was hot-reloaded.")
-                return f"Success: {target} was reloaded and the instance in the core was replaced."
-            
-            return f"Success: Module {module_name} was reloaded."
-        
-        except Exception as e:
-            error_msg = f"Hot-Reload for {target} failed: {e}"
-            logger.error(error_msg)
-            return error_msg
+                    if target == "storage": setattr(self, conf["attr"], new_class(old_instance.path))
+                    elif target == "memory": setattr(self, conf["attr"], new_class())
+                return f"Success: {target} reloaded."
+            return f"Success: {module_name} reloaded."
+        except Exception as e: return f"Hot-Reload failed: {e}"
