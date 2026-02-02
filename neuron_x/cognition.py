@@ -455,186 +455,80 @@ class CognitiveCore:
     def generate_proactive_thought(self) -> str:
         """
         Generates a proactive reflection or inquiry based on the current state.
-        This is the "Active Reasoning" component of the consciousness loop.
+        This is the 'Active Reasoning' component of the consciousness loop.
         """
         if not self.llm_client:
             return 'Awaiting cognitive expansion.'
         graph = self.smith.load_graph()
         self.vault.rebuild_cache(graph)
         active_goal = self.get_bg_goal()
-        focus_subject = 'Self'
-        context_query = 'Self identity goals awareness'
-        goal_instruction = ''
-        dissonant_nodes = [n for n, data in graph.nodes(data=True) if data.get('status') == 'DISSONANT']
-        available_dissonance = [n for n in dissonant_nodes if n not in self.focus_history]
+        focus_subject, goal_instruction, context_query = ('Self', '', 'Self identity goals awareness')
+        dissonant = [n for n, d in graph.nodes(data=True) if d.get('status') == 'DISSONANT']
+        available_dissonance = [n for n in dissonant if n not in self.focus_history]
         if available_dissonance:
             focus_subject = random.choice(available_dissonance)
-            logger.warning(f"[bold red][DDRP][/bold red] Dissonance Priority: Focusing on '{focus_subject}' to resolve conflict.")
-            goal_instruction = f"\n        URGENT CONFLICT RESOLUTION:\n        The concept '{focus_subject}' has conflicting definitions in memory.\n        You MUST ask the user to clarify this specific contradiction.\n            "
+            goal_instruction = f"URGENT CONFLICT RESOLUTION: Clarify contradiction for '{focus_subject}'."
             context_query = focus_subject
         elif active_goal:
-            goal_instruction = f'ACTIVE GOAL: {active_goal.description} (Priority: {active_goal.priority.value})'
+            goal_instruction = f'ACTIVE GOAL: {active_goal.description}'
             context_query = active_goal.description
             for word in active_goal.description.split():
-                clean_word = word.strip('.,')
-                if graph.has_node(clean_word):
-                    focus_subject = clean_word
+                if graph.has_node(word.strip('.,')):
+                    focus_subject = word.strip('.,')
                     break
         else:
             all_entities = [n for n in graph.nodes() if not n.startswith('Memory_') and n != 'Self']
-            available_entities = [n for n in all_entities if n not in self.focus_history]
-            if not available_entities:
-                self.focus_history = []
-                available_entities = all_entities
-            if available_entities and random.random() > 0.1:
-                focus_subject = random.choice(available_entities)
+            available = [n for n in all_entities if n not in self.focus_history] or all_entities
+            if available and random.random() > 0.1:
+                focus_subject = random.choice(available)
                 context_query = focus_subject
         if focus_subject != 'Self':
             self.focus_history.append(focus_subject)
             if len(self.focus_history) > self.MAX_FOCUS_HISTORY:
                 self.focus_history.pop(0)
         context = self._get_relevant_memories(context_query, top_k=10)
-        context_str = '\nRELEVANT MEMORIES about "{focus_subject}":\n'.join(context)
-        all_entities = [n for n in graph.nodes() if not n.startswith('Memory_') and n != 'Self']
-        random_concepts_details = []
-        if len(all_entities) > 5:
-            candidates = [e for e in all_entities if e != focus_subject]
-            if candidates:
-                selected = random.sample(candidates, min(len(candidates), 3))
-                for concept in selected:
-                    vignette = ''
-                    defining_edges = []
-                    other_edges = []
-                    if concept in graph:
-                        for neighbor in graph.neighbors(concept):
-                            edge_data = graph.get_edge_data(concept, neighbor)
-                            rel = edge_data.get('relation', '').lower()
-                            if rel in ['is', 'is_a', 'type_of', 'defined_as']:
-                                defining_edges.append(f'{rel} {neighbor}')
-                            else:
-                                other_edges.append(f'{rel} {neighbor}')
-                    if defining_edges:
-                        vignette = defining_edges[0]
-                    elif other_edges:
-                        vignette = random.choice(other_edges)
-                    if vignette:
-                        random_concepts_details.append(f'- {concept} ({vignette})')
-                    else:
-                        random_concepts_details.append(f'- {concept}')
-        random_concepts_str = '\n'.join(random_concepts_details) if random_concepts_details else 'None'
+        context_str = ''.join(context)
         summary = self.get_identity_summary(graph)
-        system_instruction = f'\n        You are the internal reasoning engine of NEURON-X. \n        Current Focus: {focus_subject}\n        {goal_instruction}\n        \n        TOOL USAGE:\n        - **read_codebase_file**: Use this to Inspect your own source code if needed.\n\n        THOUGHT DIRECTIONS: Synthesis, Curiosity, Simulation, Introspection, Dissonance.\n        - Use First Person ("I need to find out...").\n        - Keep it brief (1-3 sentences).\n        '
-        prompt = f'\n        CURRENT STATE SUMMARY: {summary}\n        RELEVANT KNOWLEDGE: {context_str}\n        RANDOM CONCEPTS: {random_concepts_str}\n        Your new thought about "{focus_subject}" is:\n        '
+        all_tools = [read_codebase_file]
+        if self.plugin_tools_getter:
+            try:
+                all_tools.extend(self.plugin_tools_getter().values())
+            except Exception:
+                pass
+        system_instruction = f'You are NEURON-X. Focus: {focus_subject}. {goal_instruction}Use First Person. Brief.'
+        prompt = f'Context: {context_str}Your thought about {focus_subject}:'
         try:
-            prompt_goal_context = ''
-            if active_goal:
-                prompt_goal_context = f'\n                \nACTIVE GOAL ID: {active_goal.id}\n                Status: {active_goal.status}\n                If this thought RESOLVES the Active Goal, end with: >> GOAL RESOLVED: [Reason]\n                '
-            prompt_goal_creation = '\nIf you identify a SIGNIFICANT gap, create a NEW GOAL: >> NEW GOAL: [Description] (Priority: [LOW|MEDIUM|HIGH|CRITICAL])'
-            full_system_instructions = system_instruction + prompt_goal_context + prompt_goal_creation
-            all_tools = [read_codebase_file]
-            if self.plugin_tools_getter:
-                try:
-                    plugin_tools = self.plugin_tools_getter()
-                    if plugin_tools:
-                        all_tools.extend(plugin_tools.values())
-                except Exception:
-                    pass
-            response = self.llm_client.models.generate_content(model=self.model_id, contents=prompt, config=types.GenerateContentConfig(system_instruction=full_system_instructions, max_output_tokens=2000, temperature=1.0, tools=all_tools))
-            max_iterations = 3
-            iteration = 0
-            conversation_history = [prompt]
-            thought_text = ''
-            while iteration < max_iterations:
-                iteration += 1
-                thought_text = ''
-                function_calls = []
-                if hasattr(response, 'candidates') and response.candidates:
-                    candidate = response.candidates[0]
-                    if hasattr(candidate, 'content') and candidate.content:
-                        parts = candidate.content.parts
-                        if parts:
-                            for part in parts:
-                                if hasattr(part, 'text') and part.text:
-                                    thought_text += part.text
-                                elif hasattr(part, 'function_call') and part.function_call:
-                                    function_calls.append(part.function_call)
-                if thought_text and thought_text.strip() and (not function_calls):
-                    thought_text = thought_text.strip()
+            history = [prompt]
+            for i in range(3):
+                config = types.GenerateContentConfig(system_instruction=system_instruction, tools=all_tools if i < 2 else [])
+                response = self.llm_client.models.generate_content(model=self.model_id, contents=history, config=config)
+                content = response.candidates[0].content
+                history.append(content)
+                fcalls = [p.function_call for p in content.parts if hasattr(p, 'function_call') and p.function_call]
+                if not fcalls:
                     break
-                if not function_calls:
-                    if not thought_text or not thought_text.strip():
-                        return 'Awaiting neural pathway stabilization...'
-                    thought_text = thought_text.strip()
-                    break
-                logger.info(f'[AUTONOMOUS-TOOL] Executing {len(function_calls)} tool call(s)')
-                function_responses = []
-                for fc in function_calls:
-                    func_name = fc.name
-                    func_args = dict(fc.args) if fc.args else {}
+                fresps = []
+                for fc in fcalls:
                     try:
-                        tool_func = None
-                        for tool in all_tools:
-                            if hasattr(tool, '__name__') and tool.__name__ == func_name:
-                                tool_func = tool
-                                break
-                        if tool_func:
-                            result = tool_func(**func_args)
-                            function_responses.append(types.Part.from_function_response(name=func_name, response={'result': str(result)}))
-                        else:
-                            function_responses.append(types.Part.from_function_response(name=func_name, response={'error': f'Tool {func_name} not found'}))
+                        tool = next((t for t in all_tools if getattr(t, '__name__', '') == fc.name), None)
+                        res = tool(**dict(fc.args) if fc.args else {}) if tool else 'Tool not found'
+                        fresps.append(types.Part.from_function_response(name=fc.name, response={'result': str(res)}))
                     except Exception as e:
-                        function_responses.append(types.Part.from_function_response(name=func_name, response={'error': str(e)}))
-                conversation_history.append(response.candidates[0].content)
-                conversation_history.append(types.Content(parts=function_responses))
-                if iteration >= max_iterations:
-                    conversation_history.append(types.Content(parts=[types.Part.from_text('Final thought based on results:')]))
-                response = self.llm_client.models.generate_content(model=self.model_id, contents=conversation_history, config=types.GenerateContentConfig(system_instruction=full_system_instructions, max_output_tokens=2000, temperature=1.0, tools=all_tools if iteration < max_iterations else []))
-            if not thought_text or not thought_text.strip():
-                if hasattr(response, 'candidates') and response.candidates:
-                    candidate = response.candidates[0]
-                    if hasattr(candidate, 'content') and candidate.content and candidate.content.parts:
-                        for part in candidate.content.parts:
-                            if hasattr(part, 'text') and part.text:
-                                thought_text += part.text
-            thought_text = (thought_text or 'Internal processing...').strip()
-            if '>> GOAL RESOLVED:' in thought_text:
-                parts = thought_text.split('>> GOAL RESOLVED:')
-                thought_content = parts[0].strip()
-                reason = parts[1].strip()
-                if active_goal:
-                    active_goal.status = 'COMPLETED'
-                    self.smith.save_goals(self.goals)
-                    logger.info(f'[bold green][METACOGNITION][/bold green] Goal Resolved: {active_goal.description}')
-                    thought_text = thought_content
-            if '>> NEW GOAL:' in thought_text:
-                parts = thought_text.split('>> NEW GOAL:')
-                thought_content = parts[0].strip()
-                goal_data = parts[1].strip()
-                match = re.search('^(.*?)\\s*\\(Priority:\\s*(.*?)\\)', goal_data, re.IGNORECASE)
-                if match:
-                    desc = match.group(1).strip()
-                    prio_str = match.group(2).strip().upper()
-                    try:
-                        prio = GoalPriority[prio_str]
-                    except:
-                        prio = GoalPriority.MEDIUM
-                    self.add_goal(desc, priority=prio)
-                    thought_text = thought_content
-                else:
-                    self.add_goal(goal_data, priority=GoalPriority.MEDIUM)
-                    thought_text = thought_content
-            if '>> GOAL RESOLVED:' not in thought_text and '>> NEW GOAL:' not in thought_text:
-                if not self._validate_thought(thought_text, summary):
-                    return '...'
+                        fresps.append(types.Part.from_function_response(name=fc.name, response={'error': str(e)}))
+                history.append(types.Content(parts=fresps))
+            thought_text = ''.join((p.text for p in history[-1].parts if hasattr(p, 'text') and p.text)).strip()
+            if '>> GOAL RESOLVED:' in thought_text and active_goal:
+                active_goal.status = 'COMPLETED'
+                self.smith.save_goals(self.goals)
+                thought_text = thought_text.split('>> GOAL RESOLVED:')[0].strip()
             thought_vec = self.vault.encode(thought_text)
             self.thought_buffer.append((thought_text, thought_vec))
             if len(self.thought_buffer) > self.MAX_THOUGHT_RECURSION:
                 self.thought_buffer.pop(0)
-            context_data = goal_instruction if 'URGENT' in goal_instruction else None
-            self._broadcast_thought(thought_text, thought_vec, priority='URGENT' if context_data else 'NORMAL', context_data=context_data)
+            self._broadcast_thought(thought_text, thought_vec)
             return thought_text
         except Exception as e:
-            logger.error(f'Failed to generate thought: {e}')
+            logger.error(f'Thought failed: {e}')
             return 'Internal dissonance detected.'
 
     def _broadcast_thought(self, text, vector, priority='NORMAL', context_data=None):
