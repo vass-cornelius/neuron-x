@@ -346,109 +346,81 @@ class CognitiveCore:
             self.vault.rebuild_cache(graph)
         if len(graph.nodes()) <= 1:
             return []
-        reinforcement = float(graph.nodes['Self'].get('reinforcement_sum', 0.0)) if 'Self' in graph else 0.0
-        entropy = float(graph.nodes['Self'].get('entropy_sum', 0.0)) if 'Self' in graph else 0.0
+        self_data = graph.nodes.get('Self', {})
+        reinforcement = float(self_data.get('reinforcement_sum', 0.0))
+        entropy = float(self_data.get('entropy_sum', 0.0))
         ratio = entropy / (reinforcement + 1.0)
-        similarity_threshold = max(0.15, 0.4 - ratio * 0.25)
+        sim_threshold = max(0.15, 0.4 - ratio * 0.25)
         edge_weight_threshold = 0.15
         query_vector = self.vault.encode(text)
-        candidates = self.vault.get_similar_nodes(query_vector, top_k=top_k * 2, threshold=similarity_threshold, graph=graph)
+        candidates = self.vault.get_similar_nodes(query_vector, top_k=top_k * 2, threshold=sim_threshold, graph=graph)
         top_nodes = [node for score, node in candidates][:top_k]
         extracted_context = []
-        seen_triples = set()
         memory_nodes = [n for n in top_nodes if n.startswith('Memory_')]
         entity_nodes = [n for n in top_nodes if not n.startswith('Memory_')]
         for node in memory_nodes:
             content = graph.nodes[node].get('content', '')
             if content:
-                is_relevant = False
                 if self.vault.cross_encoder:
                     try:
-                        score = self.vault.cross_encoder.predict([(text, content)])
-                        if score > -0.5:
-                            is_relevant = True
+                        if self.vault.cross_encoder.predict([(text, content)]) > -0.5:
+                            extracted_context.append(f'Context: {content}')
                     except Exception:
-                        is_relevant = True
+                        extracted_context.append(f'Context: {content}')
                 else:
-                    is_relevant = True
-                if is_relevant:
                     extracted_context.append(f'Context: {content}')
         expanded_entities = set(entity_nodes)
         for node in entity_nodes:
-            for neighbor in graph.neighbors(node):
-                if neighbor != 'Self':
-                    expanded_entities.add(neighbor)
-            for pred in graph.predecessors(node):
-                if pred != 'Self':
-                    expanded_entities.add(pred)
-        bad_relations = {'is_incorrect', 'is_hallucination', 'is_wrong', 'rejected', 'was_incorrectly_identified_as', 'incorrectly_identified_as', 'is_not', 'contrasts', 'conflicts_with', 'hallucinated', 'is_not_related_to', 'is_distinct_from', 'has_distinct_domain_from', 'is_not_a', 'is_not_an', 'is_not_a_kind_of', 'is_not_a_type_of'}
+            if node in graph:
+                expanded_entities.update((n for n in graph.neighbors(node) if n != 'Self'))
+                expanded_entities.update((p for p in graph.predecessors(node) if p != 'Self'))
+        bad_rels = {'is_incorrect', 'is_hallucination', 'is_wrong', 'rejected', 'was_incorrectly_identified_as', 'incorrectly_identified_as', 'is_not', 'contrasts', 'conflicts_with', 'hallucinated', 'is_not_related_to', 'is_distinct_from', 'has_distinct_domain_from', 'is_not_a', 'is_not_an', 'is_not_a_kind_of', 'is_not_a_type_of'}
         blocked_pairs = set()
-        for node in expanded_entities:
-            for neighbor in graph.neighbors(node):
-                edge_data = graph.get_edge_data(node, neighbor)
-                if edge_data.get('relation', '').lower() in bad_relations:
-                    blocked_pairs.add(tuple(sorted((node, neighbor))))
-            for pred in graph.predecessors(node):
-                edge_data = graph.get_edge_data(pred, node)
-                if edge_data.get('relation', '').lower() in bad_relations:
-                    blocked_pairs.add(tuple(sorted((pred, node))))
-        all_triples = []
-        for node in expanded_entities:
-            for neighbor in graph.neighbors(node):
-                if tuple(sorted((node, neighbor))) in blocked_pairs:
-                    continue
-                edge_data = graph.get_edge_data(node, neighbor)
-                relation = edge_data.get('relation', 'is_related_to').lower()
-                if relation in bad_relations:
-                    continue
-                weight = float(edge_data.get('weight', 1.0))
-                if weight < edge_weight_threshold and neighbor not in ['hallucinated entity', 'incorrect']:
-                    continue
-                if relation in {'parent_of', 'child_of', 'ancestor_of', 'descendant_of', 'mother_of', 'father_of', 'son_of', 'daughter_of'}:
-                    weight *= 2.0
-                all_triples.append({'s': node, 'p': relation, 'o': neighbor, 'w': weight, 'c': edge_data.get('category', 'FACTUAL'), 'r': edge_data.get('reasoning', '')})
-            for pred in graph.predecessors(node):
-                if pred not in expanded_entities:
-                    if tuple(sorted((pred, node))) in blocked_pairs:
-                        continue
-                    edge_data = graph.get_edge_data(pred, node)
-                    relation = edge_data.get('relation', 'is_related_to').lower()
-                    if relation in bad_relations:
-                        continue
-                    weight = float(edge_data.get('weight', 1.0))
-                    if weight < edge_weight_threshold and pred not in ['hallucinated entity', 'incorrect']:
-                        continue
-                    if relation in {'parent_of', 'child_of', 'ancestor_of', 'descendant_of', 'mother_of', 'father_of', 'son_of', 'daughter_of'}:
-                        weight *= 2.0
-                    all_triples.append({'s': pred, 'p': relation, 'o': node, 'w': weight, 'c': edge_data.get('category', 'FACTUAL'), 'r': edge_data.get('reasoning', '')})
-        if all_triples:
-            triple_texts = [f"{t['s']} {t['p']} {t['o']}" for t in all_triples]
-            if self.vault.cross_encoder:
-                pairs = [[text, t_text] for t_text in triple_texts]
-                try:
-                    scores = self.vault.cross_encoder.predict(pairs)
-                    for i, t in enumerate(all_triples):
-                        t['sim'] = float(scores[i])
-                    all_triples = [t for t in all_triples if t['sim'] > -0.5]
-                except Exception:
-                    pass
+        relevant_edges = []
+        for u, v, data in graph.edges(expanded_entities, data=True):
+            if u == 'Self' or v == 'Self':
+                continue
+            rel = data.get('relation', '').lower()
+            if rel in bad_rels:
+                blocked_pairs.add(tuple(sorted((u, v))))
             else:
-                t_vecs = self.vault.encode(triple_texts)
-                q_norm = np.linalg.norm(query_vector) + 1e-09
-                t_norms = np.linalg.norm(t_vecs, axis=1) + 1e-09
-                dots = np.dot(t_vecs, query_vector)
-                sims = dots / (q_norm * t_norms)
+                relevant_edges.append((u, v, data))
+        all_triples = []
+        for u, v, data in relevant_edges:
+            if tuple(sorted((u, v))) in blocked_pairs:
+                continue
+            weight = float(data.get('weight', 1.0))
+            if weight < edge_weight_threshold and v not in ['hallucinated entity', 'incorrect']:
+                continue
+            if data.get('relation', '').lower() in {'parent_of', 'child_of', 'ancestor_of', 'descendant_of'}:
+                weight *= 2.0
+            all_triples.append({'s': u, 'p': data.get('relation', 'is_related_to'), 'o': v, 'w': weight, 'c': data.get('category', 'FACTUAL'), 'r': data.get('reasoning', '')})
+        if not all_triples:
+            return extracted_context
+        triple_texts = [f"{t['s']} {t['p']} {t['o']}" for t in all_triples]
+        if self.vault.cross_encoder:
+            try:
+                scores = self.vault.cross_encoder.predict([[text, tt] for tt in triple_texts])
                 for i, t in enumerate(all_triples):
-                    t['sim'] = sims[i]
-                all_triples = [t for t in all_triples if t['sim'] > 0.55]
-            all_triples.sort(key=lambda x: (x.get('sim', 0), x['w']), reverse=True)
+                    t['sim'] = float(scores[i])
+                all_triples = [t for t in all_triples if t['sim'] > -0.5]
+            except Exception:
+                pass
+        else:
+            t_vecs = self.vault.encode(triple_texts)
+            sims = np.dot(t_vecs, query_vector) / (np.linalg.norm(t_vecs, axis=1) * np.linalg.norm(query_vector) + 1e-09)
+            for i, t in enumerate(all_triples):
+                t['sim'] = sims[i]
+            all_triples = [t for t in all_triples if t['sim'] > 0.55]
+        all_triples.sort(key=lambda x: (x.get('sim', 0), x['w']), reverse=True)
+        seen = set()
         for t in all_triples[:top_k * 4]:
             t_str = f"({t['s']}) --[{t['p']}]--> ({t['o']}) [{t['c']}]"
             if t['r']:
                 t_str += f" (Reason: {t['r']})"
-            if t_str not in seen_triples:
+            if t_str not in seen:
                 extracted_context.append(t_str)
-                seen_triples.add(t_str)
+                seen.add(t_str)
         return extracted_context
 
     def _validate_thought(self, thought_text: str, context_summary: str) -> bool:
