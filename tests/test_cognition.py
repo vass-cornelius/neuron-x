@@ -40,7 +40,6 @@ class TestCognitiveInit:
     def test_init_creates_instance(self, cognitive_core):
         """Test that CognitiveCore initializes correctly."""
         assert cognitive_core is not None
-        assert isinstance(cognitive_core.graph, nx.DiGraph)
         assert isinstance(cognitive_core.goals, list)
     
     def test_init_loads_existing_graph(self, graph_smith, vector_vault):
@@ -52,19 +51,20 @@ class TestCognitiveInit:
         
         # Create cognitive core - should load the graph
         core = CognitiveCore(graph_smith, vector_vault)
-        assert "TestNode" in core.graph.nodes()
+        graph = core.smith.load_graph()
+        assert "TestNode" in graph.nodes()
 
 
 class TestPerception:
     """Test perception functionality."""
     
     def test_perceive_adds_to_buffer(self, cognitive_core):
-        """Test that perceive adds memories to buffer."""
-        initial_size = len(cognitive_core.buffer)
+        """Test that perceive adds memories to working_memory."""
+        initial_size = len(cognitive_core.working_memory)
         cognitive_core.perceive("Test memory text")
         
-        assert len(cognitive_core.buffer) > initial_size
-        assert any("Test memory text" in m.get("text", "") for m in cognitive_core.buffer)
+        assert len(cognitive_core.working_memory) > initial_size
+        assert any("Test memory text" in m.get("text", "") for m in cognitive_core.working_memory)
 
 
 class TestGoalManagement:
@@ -73,14 +73,16 @@ class TestGoalManagement:
     def test_add_goal(self, cognitive_core):
         """Test adding a new goal."""
         initial_count = len(cognitive_core.goals)
-        cognitive_core.add_goal("Test goal description", priority="HIGH")
+        from neuron_x.const import GoalPriority
+        cognitive_core.add_goal("Test goal description", priority=GoalPriority.HIGH)
         
         assert len(cognitive_core.goals) == initial_count + 1
         assert any(g.description == "Test goal description" for g in cognitive_core.goals)
     
     def test_get_bg_goal_returns_goal(self, cognitive_core):
         """Test that get_bg_goal returns a goal when available."""
-        cognitive_core.add_goal("Test goal", priority="HIGH")
+        from neuron_x.const import GoalPriority
+        cognitive_core.add_goal("Test goal", priority=GoalPriority.HIGH)
         goal = cognitive_core.get_bg_goal()
         
         assert goal is not None
@@ -91,15 +93,15 @@ class TestConsolidation:
     """Test memory consolidation."""
     
     def test_consolidate_processes_buffer(self, cognitive_core):
-        """Test that consolidate processes the buffer."""
+        """Test that consolidate processes the working_memory."""
         cognitive_core.perceive("Subject relates to Object")
         cognitive_core.perceive("Another fact about Subject")
         
-        buffer_size_before = len(cognitive_core.buffer)
+        buffer_size_before = len(cognitive_core.working_memory)
         cognitive_core.consolidate()
         
         # Buffer should be cleared after consolidation
-        assert len(cognitive_core.buffer) < buffer_size_before
+        assert len(cognitive_core.working_memory) < buffer_size_before
 
 
 class TestIdentity:
@@ -107,10 +109,11 @@ class TestIdentity:
     
     def test_get_identity_summary(self, cognitive_core):
         """Test identity summary generation."""
-        # Add some self-related information
-        cognitive_core.graph.add_node("Self", type="CONCEPT")
-        cognitive_core.graph.add_node("AI", type="CONCEPT")
-        cognitive_core.graph.add_edge("Self", "AI", relation="IS_A", weight=1.0)
+        graph = nx.DiGraph()
+        graph.add_node("Self", type="CONCEPT")
+        graph.add_node("AI", type="CONCEPT")
+        graph.add_edge("Self", "AI", relation="IS_A", weight=1.0)
         
-        summary = cognitive_core.get_identity_summary(cognitive_core.graph)
+        summary = cognitive_core.get_identity_summary(graph)
         assert isinstance(summary, str)
+        assert "nodes" in summary
