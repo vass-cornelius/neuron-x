@@ -41,6 +41,8 @@ class CognitiveCore:
         self.lock = threading.RLock()
         self.goals: List[Goal] = []
         self._load_goals()
+        self.graph = self.smith.load_graph()
+        self.vault.rebuild_cache(self.graph)
 
     def _load_goals(self):
         """Delegates goal loading to storage."""
@@ -119,10 +121,13 @@ class CognitiveCore:
             self.consolidate()
 
     def consolidate(self) -> None:
-        """The 'Sleep' function: Moves info from Buffer to Graph."""
+        """
+        The 'Sleep' function: Moves info from Buffer to Graph.
+        Performs extraction, echo suppression, graph updates, entropy decay, 
+        and entity merging.
+        """
         with self.lock:
             graph = self.smith.load_graph()
-            self.vault.rebuild_cache(graph)
         if not self.working_memory:
             return
         logger.info('[bold blue][NEURON-X][/bold blue] Consolidating experiences...')
@@ -287,7 +292,12 @@ class CognitiveCore:
             logger.info(f'[bold magenta][ENTROPY][/bold magenta] Pruned {pruned} synapses.')
 
     def _merge_similar_entities(self, graph: nx.DiGraph):
-        """Uses VectorVault to merge entities."""
+        """
+        Uses VectorVault to merge entities based on semantic and name similarity.
+        Includes a fix for NetworkX/GEXF serialization issues where the 'contraction'
+        attribute becomes a string instead of a dictionary.
+        """
+        self.vault.rebuild_cache(graph)
         entities = [n for n in graph.nodes() if not n.startswith('Memory_') and n not in ['Self', 'Knowledge']]
         if len(entities) < 2:
             return
@@ -295,19 +305,21 @@ class CognitiveCore:
         removals = set()
         for i in range(len(entities)):
             node_a = entities[i]
-            if node_a in removals:
+            if node_a in removals or node_a not in graph:
                 continue
             vec_a = self.vault.vector_cache.get(node_a)
             if vec_a is None:
                 continue
             for j in range(i + 1, len(entities)):
                 node_b = entities[j]
-                if node_b in removals:
+                if node_b in removals or node_b not in graph:
                     continue
                 vec_b = self.vault.vector_cache.get(node_b)
                 if vec_b is None:
                     continue
-                sim = np.dot(vec_a, vec_b) / (np.linalg.norm(vec_a) * np.linalg.norm(vec_b) + 1e-09)
+                norm_a = np.linalg.norm(vec_a)
+                norm_b = np.linalg.norm(vec_b)
+                sim = np.dot(vec_a, vec_b) / (norm_a * norm_b + 1e-09)
                 if sim < 0.9:
                     continue
                 name_sim = difflib.SequenceMatcher(None, node_a.lower(), node_b.lower()).ratio()
@@ -318,9 +330,15 @@ class CognitiveCore:
                     should_merge = True
                 if should_merge:
                     target, source = (node_a, node_b)
-                    logger.info(f'Merging {source} into {target}')
-                    nx.contracted_nodes(graph, target, source, self_loops=False, copy=False)
-                    removals.add(source)
+                    logger.info(f"[bold yellow][NEURON-X][/bold yellow] Merging semantic twins: '{source}' -> '{target}' (Sim: {sim:.2f})")
+                    for n in [target, source]:
+                        if n in graph and 'contraction' in graph.nodes[n]:
+                            del graph.nodes[n]['contraction']
+                    try:
+                        nx.contracted_nodes(graph, target, source, self_loops=False, copy=False)
+                        removals.add(source)
+                    except Exception as e:
+                        logger.error(f'Failed to merge {source} into {target}: {e}')
 
     def _dream_cycle(self, graph: nx.DiGraph):
         """Generates hypotheses."""
@@ -343,10 +361,10 @@ class CognitiveCore:
         reinforcement = float(graph.nodes['Self'].get('reinforcement_sum', 0.0)) if 'Self' in graph else 0.0
         entropy = float(graph.nodes['Self'].get('entropy_sum', 0.0)) if 'Self' in graph else 0.0
         ratio = entropy / (reinforcement + 1.0)
-        sim_threshold = max(0.15, 0.4 - ratio * 0.25)
-        edge_threshold = 0.15
+        similarity_threshold = max(0.15, 0.4 - ratio * 0.25)
+        edge_weight_threshold = 0.15
         query_vector = self.vault.encode(text)
-        candidates = self.vault.get_similar_nodes(query_vector, top_k=top_k * 2, threshold=sim_threshold, graph=graph)
+        candidates = self.vault.get_similar_nodes(query_vector, top_k=top_k * 2, threshold=similarity_threshold, graph=graph)
         top_nodes = [node for score, node in candidates][:top_k]
         extracted_context = []
         seen_triples = set()
@@ -355,39 +373,72 @@ class CognitiveCore:
         for node in memory_nodes:
             content = graph.nodes[node].get('content', '')
             if content:
+                is_relevant = False
                 if self.vault.cross_encoder:
                     try:
-                        if self.vault.cross_encoder.predict([(text, content)]) <= -0.5:
-                            continue
+                        score = self.vault.cross_encoder.predict([(text, content)])
+                        if score > -0.5:
+                            is_relevant = True
                     except Exception:
-                        pass
-                extracted_context.append(f'Context: {content}')
-        expanded_nodes = set(entity_nodes)
+                        is_relevant = True
+                else:
+                    is_relevant = True
+                if is_relevant:
+                    extracted_context.append(f'Context: {content}')
+        expanded_entities = set(entity_nodes)
         for node in entity_nodes:
-            expanded_nodes.update((n for n in graph.neighbors(node) if n != 'Self'))
-            expanded_nodes.update((p for p in graph.predecessors(node) if p != 'Self'))
+            for neighbor in graph.neighbors(node):
+                if neighbor != 'Self':
+                    expanded_entities.add(neighbor)
+            for pred in graph.predecessors(node):
+                if pred != 'Self':
+                    expanded_entities.add(pred)
         bad_relations = {'is_incorrect', 'is_hallucination', 'is_wrong', 'rejected', 'was_incorrectly_identified_as', 'incorrectly_identified_as', 'is_not', 'contrasts', 'conflicts_with', 'hallucinated', 'is_not_related_to', 'is_distinct_from', 'has_distinct_domain_from', 'is_not_a', 'is_not_an', 'is_not_a_kind_of', 'is_not_a_type_of'}
+        blocked_pairs = set()
+        for node in expanded_entities:
+            for neighbor in graph.neighbors(node):
+                edge_data = graph.get_edge_data(node, neighbor)
+                if edge_data.get('relation', '').lower() in bad_relations:
+                    blocked_pairs.add(tuple(sorted((node, neighbor))))
+            for pred in graph.predecessors(node):
+                edge_data = graph.get_edge_data(pred, node)
+                if edge_data.get('relation', '').lower() in bad_relations:
+                    blocked_pairs.add(tuple(sorted((pred, node))))
         all_triples = []
-        for u in expanded_nodes:
-            if u not in graph:
-                continue
-            for v, edge_data in graph[u].items():
-                if v == 'Self':
+        for node in expanded_entities:
+            for neighbor in graph.neighbors(node):
+                if tuple(sorted((node, neighbor))) in blocked_pairs:
                     continue
-                rel = edge_data.get('relation', 'is_related_to').lower()
-                if rel in bad_relations:
+                edge_data = graph.get_edge_data(node, neighbor)
+                relation = edge_data.get('relation', 'is_related_to').lower()
+                if relation in bad_relations:
                     continue
                 weight = float(edge_data.get('weight', 1.0))
-                if weight < edge_threshold and v not in ['hallucinated entity', 'incorrect']:
+                if weight < edge_weight_threshold and neighbor not in ['hallucinated entity', 'incorrect']:
                     continue
-                if rel in {'parent_of', 'child_of', 'ancestor_of', 'descendant_of'}:
+                if relation in {'parent_of', 'child_of', 'ancestor_of', 'descendant_of', 'mother_of', 'father_of', 'son_of', 'daughter_of'}:
                     weight *= 2.0
-                all_triples.append({'s': u, 'p': rel, 'o': v, 'w': weight, 'c': edge_data.get('category', 'FACTUAL'), 'r': edge_data.get('reasoning', '')})
+                all_triples.append({'s': node, 'p': relation, 'o': neighbor, 'w': weight, 'c': edge_data.get('category', 'FACTUAL'), 'r': edge_data.get('reasoning', '')})
+            for pred in graph.predecessors(node):
+                if pred not in expanded_entities:
+                    if tuple(sorted((pred, node))) in blocked_pairs:
+                        continue
+                    edge_data = graph.get_edge_data(pred, node)
+                    relation = edge_data.get('relation', 'is_related_to').lower()
+                    if relation in bad_relations:
+                        continue
+                    weight = float(edge_data.get('weight', 1.0))
+                    if weight < edge_weight_threshold and pred not in ['hallucinated entity', 'incorrect']:
+                        continue
+                    if relation in {'parent_of', 'child_of', 'ancestor_of', 'descendant_of', 'mother_of', 'father_of', 'son_of', 'daughter_of'}:
+                        weight *= 2.0
+                    all_triples.append({'s': pred, 'p': relation, 'o': node, 'w': weight, 'c': edge_data.get('category', 'FACTUAL'), 'r': edge_data.get('reasoning', '')})
         if all_triples:
             triple_texts = [f"{t['s']} {t['p']} {t['o']}" for t in all_triples]
             if self.vault.cross_encoder:
+                pairs = [[text, t_text] for t_text in triple_texts]
                 try:
-                    scores = self.vault.cross_encoder.predict([[text, tt] for tt in triple_texts])
+                    scores = self.vault.cross_encoder.predict(pairs)
                     for i, t in enumerate(all_triples):
                         t['sim'] = float(scores[i])
                     all_triples = [t for t in all_triples if t['sim'] > -0.5]
@@ -395,9 +446,12 @@ class CognitiveCore:
                     pass
             else:
                 t_vecs = self.vault.encode(triple_texts)
-                sims = np.dot(t_vecs, query_vector) / (np.linalg.norm(t_vecs, axis=1) * np.linalg.norm(query_vector) + 1e-09)
+                q_norm = np.linalg.norm(query_vector) + 1e-09
+                t_norms = np.linalg.norm(t_vecs, axis=1) + 1e-09
+                dots = np.dot(t_vecs, query_vector)
+                sims = dots / (q_norm * t_norms)
                 for i, t in enumerate(all_triples):
-                    t['sim'] = float(sims[i])
+                    t['sim'] = sims[i]
                 all_triples = [t for t in all_triples if t['sim'] > 0.55]
             all_triples.sort(key=lambda x: (x.get('sim', 0), x['w']), reverse=True)
         for t in all_triples[:top_k * 4]:
