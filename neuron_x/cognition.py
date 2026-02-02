@@ -297,48 +297,36 @@ class CognitiveCore:
         Includes a fix for NetworkX/GEXF serialization issues where the 'contraction'
         attribute becomes a string instead of a dictionary.
         """
+        import itertools
         self.vault.rebuild_cache(graph)
-        entities = [n for n in graph.nodes() if not n.startswith('Memory_') and n not in ['Self', 'Knowledge']]
+        entities = sorted([n for n in graph.nodes() if not n.startswith('Memory_') and n not in ['Self', 'Knowledge']])
         if len(entities) < 2:
             return
-        entities.sort()
         removals = set()
-        for i in range(len(entities)):
-            node_a = entities[i]
-            if node_a in removals or node_a not in graph:
+        for node_a, node_b in itertools.combinations(entities, 2):
+            if node_a in removals or node_b in removals or node_a not in graph or (node_b not in graph):
                 continue
             vec_a = self.vault.vector_cache.get(node_a)
-            if vec_a is None:
+            vec_b = self.vault.vector_cache.get(node_b)
+            if vec_a is None or vec_b is None:
                 continue
-            for j in range(i + 1, len(entities)):
-                node_b = entities[j]
-                if node_b in removals or node_b not in graph:
-                    continue
-                vec_b = self.vault.vector_cache.get(node_b)
-                if vec_b is None:
-                    continue
-                norm_a = np.linalg.norm(vec_a)
-                norm_b = np.linalg.norm(vec_b)
-                sim = np.dot(vec_a, vec_b) / (norm_a * norm_b + 1e-09)
-                if sim < 0.9:
-                    continue
-                name_sim = difflib.SequenceMatcher(None, node_a.lower(), node_b.lower()).ratio()
-                should_merge = False
-                if sim > 0.95 and name_sim > 0.75:
-                    should_merge = True
-                elif sim > 0.9 and self.vault.verify_pair_identity(node_a, node_b):
-                    should_merge = True
-                if should_merge:
-                    target, source = (node_a, node_b)
-                    logger.info(f"[bold yellow][NEURON-X][/bold yellow] Merging semantic twins: '{source}' -> '{target}' (Sim: {sim:.2f})")
-                    for n in [target, source]:
-                        if n in graph and 'contraction' in graph.nodes[n]:
-                            del graph.nodes[n]['contraction']
-                    try:
-                        nx.contracted_nodes(graph, target, source, self_loops=False, copy=False)
-                        removals.add(source)
-                    except Exception as e:
-                        logger.error(f'Failed to merge {source} into {target}: {e}')
+            norm_a = np.linalg.norm(vec_a)
+            norm_b = np.linalg.norm(vec_b)
+            sim = np.dot(vec_a, vec_b) / (norm_a * norm_b + 1e-09)
+            if sim < 0.9:
+                continue
+            name_sim = difflib.SequenceMatcher(None, node_a.lower(), node_b.lower()).ratio()
+            should_merge = sim > 0.95 and name_sim > 0.75 or (sim > 0.9 and self.vault.verify_pair_identity(node_a, node_b))
+            if should_merge:
+                logger.info(f"[bold yellow][NEURON-X][/bold yellow] Merging semantic twins: '{node_b}' -> '{node_a}' (Sim: {sim:.2f})")
+                for n in [node_a, node_b]:
+                    if n in graph and 'contraction' in graph.nodes[n]:
+                        del graph.nodes[n]['contraction']
+                try:
+                    nx.contracted_nodes(graph, node_a, node_b, self_loops=False, copy=False)
+                    removals.add(node_b)
+                except Exception as e:
+                    logger.error(f'Failed to merge {node_b} into {node_a}: {e}')
 
     def _dream_cycle(self, graph: nx.DiGraph):
         """Generates hypotheses."""

@@ -209,7 +209,8 @@ class SelfOptimizer:
         function_name: str,
         optimized_code: str,
         class_name: str | None = None,
-        use_ast: bool = True
+        use_ast: bool = True,
+        require_tests: bool | None = None
     ) -> OptimizationRecord:
         """
         Execute the Draft-Test-Commit workflow for a function optimization.
@@ -222,6 +223,7 @@ class SelfOptimizer:
             optimized_code: The optimized function code
             class_name: Class name if optimizing a method
             use_ast: Whether to use AST-based modification (safer)
+            require_tests: Whether to require tests to pass (overrides safety config)
             
         Returns:
             OptimizationRecord with details of the attempt
@@ -295,11 +297,14 @@ class SelfOptimizer:
                 self._optimization_history.append(record)
                 return record
             
+            # Determine if tests are required (parameter overrides config)
+            should_run_tests = require_tests if require_tests is not None else self.safety.requires_tests()
+            
             validation_results = self.validator.validate_all(
                 final_code,
                 module_path,
                 draft_file=draft_paths.optimized,
-                require_tests=self.safety.requires_tests()
+                require_tests=should_run_tests
             )
             record.validation_results = validation_results
             

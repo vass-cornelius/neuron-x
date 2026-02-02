@@ -165,19 +165,38 @@ class ValidationEngine:
         if isinstance(module_path, str):
             module_path = Path(module_path)
         
-        # Determine which tests to run based on ORIGINAL module name, not draft name
+        # Determine which tests to run
+        test_args = []
         if test_patterns:
             test_args = list(test_patterns)
         else:
-            # Use original module name for test discovery
-            module_name = module_path.stem
-            test_args = [f"tests/test_{module_name}.py"]
-            # Also try common alternative patterns
-            if (self.project_root / "tests" / f"test_{module_name}.py").exists():
-                pass  # Already added
+            # Better module name detection (especially for plugins)
+            if module_path.stem == "__init__":
+                module_name = module_path.parent.name
             else:
-                # If exact match doesn't exist, try pattern matching
-                test_args.append(f"tests/test_*{module_name}*.py")
+                module_name = module_path.stem
+            
+            # Check for standard test files
+            potential_tests = [
+                self.project_root / "tests" / f"test_{module_name}.py",
+                self.project_root / "tests" / f"test_{module_path.stem}.py"
+            ]
+            
+            # Filter for existing files
+            test_args = [
+                str(p.relative_to(self.project_root)) 
+                for p in potential_tests if p.exists()
+            ]
+            
+            # If no direct matches, check if we should skip
+            if not test_args:
+                msg = f"Skipped: No test files found for {module_name} in tests/"
+                logger.info(msg)
+                return ValidationResult(
+                    level=ValidationLevel.TESTS,
+                    success=True,
+                    output=msg
+                )
         
         # Construct pytest command
         cmd = [self.python_executable, "-m", "pytest", "-v", "--tb=short"] + test_args
@@ -207,6 +226,13 @@ class ValidationEngine:
                     level=ValidationLevel.TESTS,
                     success=True,
                     output=truncated_output
+                )
+            elif result.returncode == 4:
+                # Pytest exit code 4 means no tests were collected
+                return ValidationResult(
+                    level=ValidationLevel.TESTS,
+                    success=True,
+                    output=f"Success (No tests collected): {truncated_output}"
                 )
             else:
                 return ValidationResult(

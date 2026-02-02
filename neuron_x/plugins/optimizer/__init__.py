@@ -141,7 +141,8 @@ class OptimizerPlugin(BasePlugin):
         module_path: str,
         function_name: str,
         optimized_code: str,
-        class_name: str | None = None
+        class_name: str | None = None,
+        require_tests: bool = True
     ) -> str:
         """
         Optimize a specific function in a module.
@@ -159,6 +160,8 @@ class OptimizerPlugin(BasePlugin):
             function_name: Name of the function to optimize
             optimized_code: The complete optimized function code
             class_name: Class name if optimizing a method
+            require_tests: Whether to require tests to pass (defaults to True). 
+                           Set to False if no tests exist for this module.
             
         Returns:
             Success message or error description
@@ -177,7 +180,8 @@ class OptimizerPlugin(BasePlugin):
                 module_path=module_path,
                 function_name=function_name,
                 optimized_code=optimized_code,
-                class_name=class_name
+                class_name=class_name,
+                require_tests=require_tests
             )
             
             # Record the attempt in cache
@@ -190,6 +194,20 @@ class OptimizerPlugin(BasePlugin):
             
             if record.success:
                 msg = f"✓ Successfully optimized {function_name}"
+                
+                # Report if tests were skipped or not run
+                tests_found_in_results = False
+                if record.validation_results:
+                    test_results = [r for r in record.validation_results if r.level.value == "tests"]
+                    if test_results:
+                        tests_found_in_results = True
+                        tr = test_results[0]
+                        if tr.output and "Skipped" in tr.output:
+                            msg += f" (Tests skipped: {tr.output})"
+                
+                if not tests_found_in_results and not require_tests:
+                    msg += " (Tests manually bypassed)"
+                
                 if record.backup_id:
                     msg += f"\n  Backup ID: {record.backup_id}"
                 return msg
@@ -202,10 +220,18 @@ class OptimizerPlugin(BasePlugin):
                     error_parts.append("\nValidation Details:")
                     for result in record.validation_results:
                         status = "✓" if result.success else "✗"
-                        error_parts.append(f"  {status} {result.level.value}: {result.error_message or 'OK'}")
+                        label = result.level.value
                         
-                        # Include test output if available
-                        if result.level.value == "tests" and result.output:
+                        # Special handling for skipped tests in failure report
+                        msg = result.error_message or "OK"
+                        if label == "tests" and result.output and "Skipped" in result.output:
+                            status = "-"
+                            msg = result.output
+                            
+                        error_parts.append(f"  {status} {label}: {msg}")
+                        
+                        # Include test output if available and failed
+                        if label == "tests" and result.output and not result.success:
                             error_parts.append(f"\nTest Output:\n{result.output}")
                 
                 return "\n".join(error_parts)
