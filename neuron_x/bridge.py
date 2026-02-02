@@ -112,38 +112,23 @@ class NeuronBridge:
                  goal = active_goal.description if active_goal else "Wandering"
                  prefix = "URGENT INTERRUPT" if priority == "URGENT" else "Subconscious Relevance"
                  subconscious_injection = f"\n[{prefix}] Background focus: '{goal}'. Last thought: '{thought_text}' (Sim: {sim:.2f})"
-
-        # 2. Prepare Prompt
-        system_instr = get_system_instruction(summary, "", subconscious_injection)
         
-        # 3. Call LLM
+        # 2. Call LLM
         # Note: We need to bind the tool method to this instance or pass the brain's method
         # The key is that `recall_memories` needs to be a function tool.
         # Let's define a wrapper or use the one from previous interface directly?
         # Better: Define the tool function here or in Brain.
         
         def recall_memories_tool(query: str):
-            """
-            Search your long-term episodic memory for relevant information.
-            
-            CRITICAL: Use this tool when the user asks about specific people, places, 
-            events, or facts that may have been discussed in past conversations.
-            
-            Examples when to use:
-            - "Wer ist Rita Süssmuth?" → recall_memories_tool("Rita Süssmuth")
-            - "What did we discuss about X?" → recall_memories_tool("discussion about X")
-            - "Do you remember Y?" → recall_memories_tool("Y")
-            
-            Returns memory snippets and knowledge graph triples with factual information.
-            """
             res = self.brain._get_relevant_memories(query)
             return "\n".join(res) if res else "No memories found."
-
         
         # Collect all tools (built-in + plugins)
         all_tools = [recall_memories_tool]
         plugin_tools = self.plugin_manager.get_all_tools()
         all_tools.extend(plugin_tools.values())
+
+        system_instr = get_system_instruction(summary, "", subconscious_injection)
 
         response = self.chat_session.send_message(
             message=user_text,

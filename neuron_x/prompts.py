@@ -108,8 +108,8 @@ def get_system_instruction(summary: str, memory_injection: str, subconscious_inj
             KOGNITIVE RICHTLINIEN:
             
             0. **MEMORY FIRST**: When the user asks about a PERSON, PLACE, EVENT, or FACT:
-               → ALWAYS call recall_memories(query) FIRST before answering
-               → Example: User asks "Wer ist Rita Süssmuth?" → MUST call recall_memories("Rita Süssmuth")
+               → ALWAYS call recall_memories_tool(query) FIRST before answering
+               → Example: User asks "Wer ist Rita Süssmuth?" → MUST call recall_memories_tool("Rita Süssmuth")
                → Do NOT rely on training data for specific people/events from conversations
                → If recall_memories returns information, USE IT in your answer
                → Only say "I don't know" AFTER checking memory

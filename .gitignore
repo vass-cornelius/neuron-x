@@ -9,5 +9,7 @@ nohup.out
 __pycache__
 .venv
 tmp
+.pytest_cache
+
 
 memory_vault
