@@ -11,7 +11,6 @@ class GoalPriority(str, Enum):
     LOW = "LOW"
 
 # Default Paths
-# Default Paths
 ENV_MODE = os.getenv("ENV", "PROD").upper()
 
 if ENV_MODE == "DEV":
@@ -35,3 +34,4 @@ GOAL_WEIGHTS = {
 RECURSIVE_THOUGHT_THRESHOLD = float(os.getenv("RECURSIVE_THOUGHT_THRESHOLD", "0.95"))
 SDI_AI_DAMPING = float(os.getenv("NEURON_SDI_AI_DAMPING", "0.8"))
 SDI_AI_LENGTH_PENALTY = float(os.getenv("NEURON_SDI_AI_LENGTH_PENALTY", "2.0"))
+THOUGHT_LOOP_INTERVAL = int(os.getenv("NEURON_THOUGHT_LOOP_INTERVAL", "60"))

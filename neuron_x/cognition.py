@@ -44,9 +44,7 @@ class CognitiveCore:
         
         self.focus_history: List[str] = []
         self.MAX_FOCUS_HISTORY = 20
-        
-        self.focus_history: List[str] = []
-        self.MAX_FOCUS_HISTORY = 20
+        self.active_goal_id: Optional[str] = None
         
         # Thread Safety
         self.lock = threading.RLock()
@@ -66,7 +64,18 @@ class CognitiveCore:
         self.add_goal("Maintain internal consistency by resolving contradictions.", priority=GoalPriority.MEDIUM)
 
     def add_goal(self, description: str, priority: GoalPriority = GoalPriority.MEDIUM):
-        """Adds a new goal to the drive system."""
+        """Adds a new goal to the drive system with deduplication."""
+        # Deduplication: Check if an identical or very similar PENDING or IN_PROGRESS goal exists
+        desc_lower = description.lower().strip()
+        for existing in self.goals:
+            existing_lower = existing.description.lower().strip()
+            # Exact match or fuzzy match (simple containment for now to catch "Self-improvement" variations)
+            if (existing_lower == desc_lower or 
+                (desc_lower in existing_lower or existing_lower in desc_lower) and len(desc_lower) > 10) \
+               and existing.status in ["PENDING", "IN_PROGRESS"]:
+                logger.debug(f"[NEURON-X] Skipping duplicate or similar goal: {description[:50]}...")
+                return
+
         goal = Goal(description=description, priority=priority)
         self.goals.append(goal)
         self.smith.save_goals(self.goals)
@@ -74,6 +83,23 @@ class CognitiveCore:
 
     def get_bg_goal(self) -> Optional[Goal]:
         """Returns a goal based on probabilistic priority (Stochastic Selection)."""
+        # 1. Check if we already have an active goal that is still IN_PROGRESS
+        if self.active_goal_id:
+            for g in self.goals:
+                if g.id == self.active_goal_id and g.status == "IN_PROGRESS":
+                    return g
+            # If not found or not in progress, reset
+            self.active_goal_id = None
+
+        # 2. Prefer IN_PROGRESS goals if any (e.g. from previous sessions)
+        in_progress = [g for g in self.goals if g.status == "IN_PROGRESS"]
+        if in_progress:
+            chosen = in_progress[0]
+            self.active_goal_id = chosen.id
+            return chosen
+
+        # 3. Pick a new PENDING goal
+        # Special case: If we have multiple "Self-improvement" goals, pick the first one
         pending_goals = [g for g in self.goals if g.status == "PENDING"]
         if not pending_goals:
             return None
@@ -82,8 +108,13 @@ class CognitiveCore:
         
         try:
             chosen_goal = random.choices(pending_goals, weights=weights, k=1)[0]
+            # Mark as IN_PROGRESS
+            chosen_goal.status = "IN_PROGRESS"
+            self.active_goal_id = chosen_goal.id
+            self.smith.save_goals(self.goals)
             return chosen_goal
-        except IndexError:
+        except Exception as e:
+            logger.error(f"Error selecting background goal: {e}")
             return pending_goals[0]
 
     def perceive(self, text: str, source: str = "Internal") -> None:
@@ -998,7 +1029,15 @@ class CognitiveCore:
                 import os
                 probability = float(os.getenv('AUTONOMOUS_OPT_PROBABILITY', '0.05'))
                 roll = random.random()
-                if roll < probability:
+                
+                # Preventive check: Don't even scan if we already have a PENDING self-improvement goal
+                has_pending_improvement = any(
+                    ("Self-improvement" in g.description or "optimization opportunities" in g.description.lower()) 
+                    and g.status in ["PENDING", "IN_PROGRESS"]
+                    for g in self.goals
+                )
+                
+                if roll < probability and not has_pending_improvement:
                     try:
                         logger.info(f"[AUTO-OPT] Consciousness cycle triggered autonomous optimization scan (roll={roll:.4f}, threshold={probability})")
                         plugin_tools = self.plugin_tools_getter()

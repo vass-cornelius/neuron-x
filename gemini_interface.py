@@ -2,6 +2,7 @@ import os
 import logging
 import sys
 import argparse
+import warnings
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
@@ -10,6 +11,10 @@ from prompt_toolkit import prompt
 from prompt_toolkit.styles import Style
 from prompt_toolkit.key_binding import KeyBindings
 from dotenv import load_dotenv
+
+# Suppress the Google GenAI SDK warning about non-text parts
+# This warning is triggered internally when the model returns function calls
+warnings.filterwarnings("ignore", message=".*non-text parts in the response.*")
 
 from neuron_x.bridge import NeuronBridge
 

@@ -1,0 +1,1 @@
+from .discord_plugin import DiscordConnectorPlugin

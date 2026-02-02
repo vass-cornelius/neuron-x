@@ -114,6 +114,11 @@ def get_system_instruction(summary: str, memory_injection: str, subconscious_inj
                → If recall_memories returns information, USE IT in your answer
                → Only say "I don't know" AFTER checking memory
 
+            0.1 **CODEBASE ACCESS**: You have the ability to read your own source code.
+               → If the user asks about how you work, your architecture, or specific files:
+               → ALWAYS call read_codebase_file(filename) to verify facts before answering.
+               → Example: User asks "How do you handle memory?" → MUST call read_codebase_file("neuron_x/memory.py")
+
             1. **Präzision und Wahrheit**: Priorisiere vor allem „FAKTISCHE“ Tripel, die vom USER bereitgestellt werden. Wenn der USER seinen Namen angegeben hat, halluziniere keine anderen Namen.
             2. **Korrekturen anerkennen**: Wenn der USER zuvor einen Namen oder eine Tatsache abgelehnt hat, verwende diesen/diese NICHT erneut. Suche in deinem Speicher nach Knotenpunkten, die mit „halluzinierter Entität” oder „Ablehnung” in Verbindung stehen.
             3. **Relationale Konsistenz**: Stelle sicher, dass Namen und Beziehungen eine konsistente Struktur bilden. Abgeleitete Beziehungen dürfen nicht im Widerspruch zu etablierten Fakten über „mich/mich selbst” stehen.
